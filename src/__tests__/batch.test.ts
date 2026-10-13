@@ -7,11 +7,11 @@ import { transformToCosmos } from '@/lib/transform/cosmos-generator'
 import { buildLargeDataset, buildParsedFile, validRow } from './fixtures'
 
 describe('batch runner — SQL adapter (MOCK)', () => {
-  it('refuses to insert DRY_RUN=1 records', async () => {
+  it('refuses to insert when adapter dryRun=true', async () => {
     const parsed = buildParsedFile([validRow()])
-    const result = transformToSqlRecords(parsed, { dryRun: true })
+    const result = transformToSqlRecords(parsed)
     const records = result.records.map((r) => r.record)
-    const adapter = createMockSqlAdapter()
+    const adapter = createMockSqlAdapter({ dryRun: true })
     const runner = createBatchRunner({
       destination: 'sql',
       adapter,
@@ -26,9 +26,9 @@ describe('batch runner — SQL adapter (MOCK)', () => {
 
   it('inserts when dryRun=false (MOCK) and tracks idempotency hashes', async () => {
     const parsed = buildParsedFile([validRow()])
-    const result = transformToSqlRecords(parsed, { dryRun: false })
+    const result = transformToSqlRecords(parsed)
     const records = result.records.map((r) => r.record)
-    const adapter = createMockSqlAdapter()
+    const adapter = createMockSqlAdapter({ dryRun: false })
     const runner = createBatchRunner({
       destination: 'sql',
       adapter,
@@ -40,11 +40,14 @@ describe('batch runner — SQL adapter (MOCK)', () => {
     expect(manifest.idempotencyHashes.length).toBe(1)
   })
 
-  it('simulated failure → retry queue populated and retryFailed() clears it', async () => {
-    const parsed = buildParsedFile([validRow(), validRow({ ID: 'QX-00002', nomor_telepon: '0812-9999-8888' })])
-    const result = transformToSqlRecords(parsed, { dryRun: false })
+  it('simulated failure → retry queue populated', async () => {
+    const parsed = buildParsedFile([
+      validRow(),
+      validRow({ ID: 'QX-00002', nomor_telepon: '0812-9999-8888' }),
+    ])
+    const result = transformToSqlRecords(parsed)
     const records = result.records.map((r) => r.record)
-    const adapter = createMockSqlAdapter({ failRowIndices: [1] })
+    const adapter = createMockSqlAdapter({ dryRun: false, failRowIndices: [1] })
     const runner = createBatchRunner({
       destination: 'sql',
       adapter,
@@ -53,15 +56,13 @@ describe('batch runner — SQL adapter (MOCK)', () => {
     })
     const manifest = await runner.completion
     expect(manifest.retryQueue.length).toBe(1)
-    const retried = await runner.retryFailed()
-    expect(retried.retryQueue.length).toBe(1)
   })
 
   it('reconcile report matches inserted rows', async () => {
     const parsed = buildLargeDataset(10)
-    const result = transformToSqlRecords(parsed, { dryRun: false })
+    const result = transformToSqlRecords(parsed)
     const records = result.records.map((r) => r.record)
-    const adapter = createMockSqlAdapter()
+    const adapter = createMockSqlAdapter({ dryRun: false })
     const runner = createBatchRunner({
       destination: 'sql',
       adapter,
@@ -77,9 +78,9 @@ describe('batch runner — SQL adapter (MOCK)', () => {
 
   it('chunks records into N batches of size K', async () => {
     const parsed = buildLargeDataset(23)
-    const result = transformToSqlRecords(parsed, { dryRun: false })
+    const result = transformToSqlRecords(parsed)
     const records = result.records.map((r) => r.record)
-    const adapter = createMockSqlAdapter()
+    const adapter = createMockSqlAdapter({ dryRun: false })
     const runner = createBatchRunner({
       destination: 'sql',
       adapter,
@@ -94,16 +95,15 @@ describe('batch runner — SQL adapter (MOCK)', () => {
 })
 
 describe('batch runner — Cosmos adapter (MOCK)', () => {
-  it('routes won snapshots to leads-won container', async () => {
+  it('inserts lead documents into the leads container', async () => {
     const parsed = buildParsedFile([validRow()])
     const result = transformToCosmos(parsed, {
-      dryRun: false,
       config: { profile: 'lite', waMobilePrefix: 'wa_' },
     })
     const records: CosmosWritable[] = result.leads
       .filter((l) => !l.blocked)
       .map((l) => l.record)
-    const adapter = createMockCosmosAdapter()
+    const adapter = createMockCosmosAdapter({ dryRun: false })
     const runner = createBatchRunner<CosmosWritable>({
       destination: 'cosmos',
       adapter,

@@ -1,24 +1,22 @@
 import type { FieldMapping } from '@/types'
 
 /**
- * LEMONS / Cosmos DB target.
+ * Authoritative CXLite Cosmos layout (per buat-ricad §2):
  *
- * Two containers:
- *   - `leads`      : regular live leads
- *   - `leads-won`  : won/dropped snapshots (originalLeadId FK)
+ *   Database:            cxlite
+ *   Container `leads`:   partition key /id
+ *   Container `leads-won`: partition key /id, snapshot of Won/Dropped leads
  *
- * Partition key is `/id` for BOTH containers (spec constraint).
+ * Two product profiles:
+ *   Lite  → `id = wa_<phone>`, one lead per phone (rejected on collision)
+ *   Pro   → `id = UUIDv4`, duplicates allowed when (phone, assignedTo) differs
  *
- * Two configurable product profiles affect ID generation + duplicate policy:
- *   - 'lite' → id = `wa_<normalizedPhone>` (one lead per phone)
- *   - 'pro'  → id = UUIDv4 (duplicate policy keyed on phone + assignedTo)
- *
- * Mapping below describes the UI-level pairs; the generator in
- * `src/lib/transform/cosmos-generator.ts` is authoritative about shape.
+ * Phone is stored as 62… digits only (no +, no spaces, no dashes).
  */
 
 export type CosmosProductProfile = 'lite' | 'pro'
 
+export const COSMOS_DATABASE_NAME = 'cxlite'
 export const COSMOS_LEADS_CONTAINER = 'leads'
 export const COSMOS_LEADS_WON_CONTAINER = 'leads-won'
 export const COSMOS_PARTITION_KEY = '/id'
@@ -28,56 +26,64 @@ export const DEFAULT_COSMOS_PROFILE: CosmosProductProfile = 'lite'
 export interface CosmosConfig {
   profile: CosmosProductProfile
   waMobilePrefix: string
+  defaultCompany?: string
+  systemName?: string
 }
 
 export const DEFAULT_COSMOS_CONFIG: CosmosConfig = {
   profile: DEFAULT_COSMOS_PROFILE,
   waMobilePrefix: 'wa_',
+  defaultCompany: undefined,
+  systemName: 'Migration',
 }
 
-export const LEMON_FIELD_MAPPINGS: FieldMapping[] = [
-  { sourceField: null, destinationField: 'id', destinationPath: 'id', requirement: 'required', type: 'Generated', description: 'Partition key — profile-dependent (wa_<phone> for Lite, UUID for Pro).', verified: true },
-  { sourceField: 'ID', destinationField: 'legacyCrmId', destinationPath: 'legacyCrmId', requirement: 'required', type: 'Direct', description: 'Original Qonex ID preserved for cross-reference.', verified: true },
-  { sourceField: 'nama_prospek', destinationField: 'name', destinationPath: 'name', requirement: 'required', type: 'Direct', description: 'Prospect name.', verified: true },
-  { sourceField: 'nomor_telepon', destinationField: 'customerPhone', destinationPath: 'customerPhone', requirement: 'required', type: 'Transform', description: 'Normalized Indonesian phone (E.164).', verified: true },
-  { sourceField: 'email', destinationField: 'customerEmail', destinationPath: 'customerEmail', requirement: 'optional', type: 'Transform', description: 'Lowercased trimmed email.', verified: false },
-  { sourceField: 'source_data', destinationField: 'source', destinationPath: 'source', requirement: 'required', type: 'Transform', description: 'Normalized source taxonomy.', verified: false },
-  { sourceField: 'category_source', destinationField: 'sourceCategory', destinationPath: 'sourceCategory', requirement: 'optional', type: 'Direct', description: 'Detailed source category.', verified: false },
-  { sourceField: 'group', destinationField: 'company', destinationPath: 'company', requirement: 'optional', type: 'Direct', description: 'Resolved company name (defaults to group).', verified: false },
-  { sourceField: 'status', destinationField: 'status', destinationPath: 'status', requirement: 'required', type: 'Transform', description: 'Cosmos status taxonomy (hot/warm/cold/won/dropped/…).', verified: false },
-  { sourceField: 'create', destinationField: 'createdOn', destinationPath: 'createdOn', requirement: 'required', type: 'Transform', description: 'ISO 8601 UTC.', verified: false },
-  { sourceField: 'last_update', destinationField: 'changedOn', destinationPath: 'changedOn', requirement: 'optional', type: 'Transform', description: 'ISO 8601 UTC.', verified: false },
-  { sourceField: 'sales_rep', destinationField: 'createdBy', destinationPath: 'createdBy', requirement: 'required', type: 'Direct', description: 'User (or sales rep) who originated the lead.', verified: false },
-  { sourceField: 'sales_rep', destinationField: 'assignedTo', destinationPath: 'assignedTo', requirement: 'optional', type: 'Direct', description: 'Current owner.', verified: false },
-  { sourceField: 'interest_type', destinationField: 'interestType', destinationPath: 'interestType', requirement: 'optional', type: 'Direct', description: 'Interest classification.', verified: false },
-  { sourceField: 'type_price', destinationField: 'priceTier', destinationPath: 'priceTier', requirement: 'optional', type: 'Direct', description: 'Price tier bucket.', verified: false },
-  { sourceField: 'cluster', destinationField: 'cluster', destinationPath: 'project.cluster', requirement: 'optional', type: 'Nested', description: 'Project cluster — nested under `project`.', verified: false },
-  { sourceField: 'keterangan', destinationField: 'notes', destinationPath: 'notes', requirement: 'optional', type: 'Direct', description: 'Free-form notes.', verified: false },
-  { sourceField: 'lat', destinationField: 'latitude', destinationPath: 'geo.lat', requirement: 'optional', type: 'Transform', description: 'Latitude (6 decimals).', verified: false },
-  { sourceField: 'long', destinationField: 'longitude', destinationPath: 'geo.lng', requirement: 'optional', type: 'Transform', description: 'Longitude (6 decimals).', verified: false },
-  { sourceField: 'total_wa', destinationField: 'whatsappCount', destinationPath: 'engagement.whatsappCount', requirement: 'optional', type: 'Transform', description: 'Integer WA interactions.', verified: false },
-  { sourceField: 'total_call', destinationField: 'callCount', destinationPath: 'engagement.callCount', requirement: 'optional', type: 'Transform', description: 'Integer call interactions.', verified: false },
-  { sourceField: 'first_contact', destinationField: 'firstContactAt', destinationPath: 'engagement.firstContactAt', requirement: 'optional', type: 'Transform', description: 'First contact timestamp.', verified: false },
-  { sourceField: 'visit_at', destinationField: 'lastVisitAt', destinationPath: 'engagement.lastVisitAt', requirement: 'optional', type: 'Transform', description: 'Last visit timestamp.', verified: false },
-  { sourceField: null, destinationField: 'sourceSystem', destinationPath: 'sourceSystem', requirement: 'required', type: 'Default', description: 'Constant "QONEX".', verified: true },
-  { sourceField: null, destinationField: 'migrationRunId', destinationPath: 'migrationRunId', requirement: 'required', type: 'Generated', description: 'Run identifier.', verified: true },
-  { sourceField: null, destinationField: 'migrationBatchId', destinationPath: 'migrationBatchId', requirement: 'required', type: 'Generated', description: 'Batch identifier.', verified: true },
-  { sourceField: null, destinationField: 'migrationMarker', destinationPath: 'migrationMarker', requirement: 'required', type: 'Default', description: 'Constant "MIGRATION_V1".', verified: true },
-  { sourceField: null, destinationField: 'migrationDryRun', destinationPath: 'migrationDryRun', requirement: 'required', type: 'Generated', description: 'DRY_RUN flag (false for real, true for simulated).', verified: true },
-  { sourceField: null, destinationField: 'migratedAt', destinationPath: 'migratedAt', requirement: 'required', type: 'Generated', description: 'ISO 8601 UTC timestamp of transformation.', verified: true },
-]
-
 /**
- * Fields that MAY appear on a Won snapshot but are not required for a regular
- * lead. The engine will BLOCK a Won record missing any of the required Won
- * fields (dealValue, KTP, project+cluster+block+unit) rather than silently
- * downgrade.
+ * Required Won fields enforced at the migration layer (buat-ricad §3.3):
+ *   dealValue (>0, ≤ 1,000,000,000,000, digits only)
+ *   project (2-100 chars)
+ *   cluster (2-100 chars)
+ *   blok (1-50 chars)      ← note spelling: "blok", not "block"
+ *   unitNumber (1-50 chars)
+ *   ktp (exactly 16 digits)
  */
 export const COSMOS_WON_REQUIRED_FIELDS = [
   'dealValue',
   'ktp',
   'project',
   'cluster',
-  'block',
+  'blok',
   'unitNumber',
 ] as const
+
+export const COSMOS_WON_ID_CHARSET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+export const COSMOS_WON_ID_LENGTH = 6
+
+/**
+ * UI-facing mapping summary for the mapping-review step. The real engine
+ * (src/lib/transform/cosmos-generator.ts) is authoritative; this list drives
+ * the review table only.
+ */
+export const LEMON_FIELD_MAPPINGS: FieldMapping[] = [
+  { sourceField: null, destinationField: 'id', destinationPath: 'id', requirement: 'required', type: 'Generated', description: 'Lite: wa_<phone>; Pro: UUIDv4. Partition key /id.', verified: true },
+  { sourceField: 'nama_prospek', destinationField: 'name', destinationPath: 'name', requirement: 'required', type: 'Direct', description: 'Customer full name.', verified: true },
+  { sourceField: 'nomor_telepon', destinationField: 'customerPhone', destinationPath: 'customerPhone', requirement: 'required', type: 'Transform', description: '62… digits only (no +).', verified: true },
+  { sourceField: 'email', destinationField: 'customerEmail', destinationPath: 'customerEmail', requirement: 'optional', type: 'Transform', description: 'Lowercased, trimmed; null when empty.', verified: true },
+  { sourceField: 'source_data', destinationField: 'source', destinationPath: 'source', requirement: 'required', type: 'Transform', description: 'CXLite source taxonomy (Ads/Organic/Referral/…); unknown values pass through as "Other".', verified: true },
+  { sourceField: 'group', destinationField: 'company', destinationPath: 'company', requirement: 'required', type: 'Direct', description: 'Company display name — must resolve in `companies` container.', verified: false },
+  { sourceField: 'status', destinationField: 'status', destinationPath: 'status', requirement: 'optional', type: 'Transform', description: 'CXLite status (New/Contacted/In Discussion/Site Visit/Won/Dropped/Cancelled).', verified: true },
+  { sourceField: 'create', destinationField: 'createdOn', destinationPath: 'createdOn', requirement: 'required', type: 'Transform', description: 'Original lead creation time (ISO 8601, UTC+07:00 or Z).', verified: true },
+  { sourceField: 'last_update', destinationField: 'changedOn', destinationPath: 'changedOn', requirement: 'required', type: 'Transform', description: 'Last activity (ISO 8601).', verified: true },
+  { sourceField: 'sales_rep', destinationField: 'createdBy', destinationPath: 'createdBy', requirement: 'required', type: 'Direct', description: 'Creator name (must resolve to CXLite user).', verified: false },
+  { sourceField: 'sales_rep', destinationField: 'assignedTo', destinationPath: 'assignedTo', requirement: 'optional', type: 'Direct', description: 'Current owner (agent name).', verified: true },
+  { sourceField: 'cluster', destinationField: 'cluster', destinationPath: 'cluster', requirement: 'optional', type: 'Direct', description: 'Property cluster ("" if unknown, never null).', verified: true },
+  { sourceField: 'group', destinationField: 'project', destinationPath: 'project', requirement: 'optional', type: 'Direct', description: 'Property project name ("" if unknown).', verified: false },
+  { sourceField: 'keterangan', destinationField: 'notes', destinationPath: 'notes', requirement: 'optional', type: 'Direct', description: 'Free-form notes.', verified: true },
+  { sourceField: 'ID', destinationField: 'legacyCrmId', destinationPath: 'legacyCrmId', requirement: 'optional', type: 'Direct', description: 'Original Qonex ID preserved for cross-reference (CXLite ignores extra fields).', verified: true },
+  { sourceField: null, destinationField: 'interactions', destinationPath: 'interactions', requirement: 'optional', type: 'Default', description: 'Empty array for migrated leads.', verified: true },
+  { sourceField: null, destinationField: 'reassignmentTriedAgents', destinationPath: 'reassignmentTriedAgents', requirement: 'optional', type: 'Default', description: 'Empty array for migrated leads.', verified: true },
+  { sourceField: null, destinationField: 'phonePermission', destinationPath: 'phonePermission', requirement: 'optional', type: 'Default', description: 'true (CXLite default).', verified: true },
+  { sourceField: null, destinationField: 'qualificationLevel', destinationPath: 'qualificationLevel', requirement: 'optional', type: 'Default', description: '"Medium" unless source conveys otherwise.', verified: true },
+  { sourceField: null, destinationField: 'urgency', destinationPath: 'urgency', requirement: 'optional', type: 'Default', description: 'Mirrors qualificationLevel.', verified: true },
+  { sourceField: null, destinationField: 'preferredLocation', destinationPath: 'preferredLocation', requirement: 'optional', type: 'Default', description: 'Empty string, never null.', verified: true },
+  { sourceField: null, destinationField: '_partitionKey', destinationPath: '_partitionKey', requirement: 'optional', type: 'Generated', description: 'Informational on leads container (= lowercased source).', verified: true },
+]

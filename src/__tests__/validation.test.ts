@@ -3,12 +3,10 @@ import { canOverride, runValidation } from '@/lib/validation'
 import { buildParsedFile, validRow, wonRow } from './fixtures'
 
 describe('validation engine', () => {
-  it('runs real rules — status unknown is a warning', () => {
+  it('unknown status is a WARNING on SQL (preserved as UNKNOWN group)', () => {
     const parsed = buildParsedFile([validRow({ status: 'MAYBE' })])
     const result = runValidation({ destination: 'sql', parsed })
-    const unknown = result.issues.find(
-      (i) => i.category === 'unknown-status',
-    )
+    const unknown = result.issues.find((i) => i.category === 'unknown-status')
     expect(unknown?.severity).toBe('WARNING')
   })
 
@@ -20,10 +18,8 @@ describe('validation engine', () => {
     for (const b of blocked) expect(canOverride(b)).toBe(false)
   })
 
-  it('non-structural warnings are overridable (invalid phone shape, precision)', () => {
-    const parsed = buildParsedFile([
-      validRow({ nomor_telepon: '0899 999 999' }), // short → warning
-    ])
+  it('non-structural invalid-phone warning is overridable', () => {
+    const parsed = buildParsedFile([validRow({ nomor_telepon: '0899 999 999' })])
     const result = runValidation({ destination: 'sql', parsed })
     const warning = result.issues.find(
       (i) => i.severity === 'WARNING' && i.category === 'invalid-phone',
@@ -32,14 +28,12 @@ describe('validation engine', () => {
     expect(canOverride(warning!)).toBe(true)
   })
 
-  it('produces per-row explanation including original + proposed', () => {
-    const parsed = buildParsedFile([
-      validRow({ email: 'DEWI@Example.COM', lat: -6.9039183 }),
-    ])
+  it('produces per-row description + recommendation', () => {
+    const parsed = buildParsedFile([validRow({ nomor_telepon: '0899 999 999' })])
     const result = runValidation({ destination: 'sql', parsed })
-    const precision = result.issues.find((i) => i.category === 'precision-loss')
-    expect(precision).toBeDefined()
-    expect(precision?.description).toBeTruthy()
-    expect(precision?.recommendedAction).toBeTruthy()
+    const warn = result.issues.find((i) => i.severity === 'WARNING')
+    expect(warn).toBeDefined()
+    expect(warn?.description).toBeTruthy()
+    expect(warn?.recommendedAction).toBeTruthy()
   })
 })

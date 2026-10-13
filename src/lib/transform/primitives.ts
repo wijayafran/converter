@@ -96,6 +96,17 @@ export function waMobileId(
   return `${prefix}${phone.normalized.replace(/^\+/, '')}`
 }
 
+/**
+ * Digits-only phone, with country code, no `+` / spaces / dashes.
+ * Required by both the SQL target (`leads_customer_phone varchar(50)`,
+ * production value `62811223345656`) and the CXLite Cosmos document
+ * (`customerPhone` is the same shape).
+ */
+export function digitsPhone(phone: PhoneResult): string | null {
+  if (!phone.normalized) return null
+  return phone.normalized.replace(/^\+/, '')
+}
+
 /** Preserve null/blank — never coerce to 0 */
 export function toInteger(value: unknown): number | null {
   if (isBlank(value)) return null

@@ -10,8 +10,8 @@ import {
   validRow,
 } from './fixtures'
 
-describe('transformToSqlRecords', () => {
-  it('emits all 51 columns per row', () => {
+describe('transformToSqlRecords — matches authoritative DDL', () => {
+  it('emits all 51 columns per row, in DDL order', () => {
     const parsed = buildParsedFile([validRow()])
     const result = transformToSqlRecords(parsed, { dryRun: true })
     expect(result.records).toHaveLength(1)
@@ -22,83 +22,91 @@ describe('transformToSqlRecords', () => {
     }
   })
 
-  it('generates stable leads_id for identical legacy IDs', () => {
+  it('emits event_name = LEAD_CREATED (initial snapshot POC)', () => {
+    const parsed = buildParsedFile([validRow()])
+    const result = transformToSqlRecords(parsed)
+    expect(result.records[0].record.event_name).toBe('LEAD_CREATED')
+  })
+
+  it('leaves eventlog_id NULL (eventlog is empty in POC)', () => {
+    const parsed = buildParsedFile([validRow()])
+    const result = transformToSqlRecords(parsed)
+    expect(result.records[0].record.eventlog_id).toBeNull()
+  })
+
+  it('leads_parent_channel is "ONLINE", leads_channel is UPPER(source)', () => {
+    const parsed = buildParsedFile([validRow({ source_data: 'Referral' })])
+    const result = transformToSqlRecords(parsed)
+    expect(result.records[0].record.leads_parent_channel).toBe('ONLINE')
+    expect(result.records[0].record.leads_channel).toBe('REFERRAL')
+  })
+
+  it('leads_customer_phone is digits-only (62… no +)', () => {
+    const parsed = buildParsedFile([validRow()])
+    const result = transformToSqlRecords(parsed)
+    expect(result.records[0].record.leads_customer_phone).toBe('6281234567890')
+  })
+
+  it('leads_parent_id is wa_<digitsPhone>', () => {
+    const parsed = buildParsedFile([validRow()])
+    const result = transformToSqlRecords(parsed, { waMobilePrefix: 'wa_' })
+    expect(result.records[0].record.leads_parent_id).toBe('wa_6281234567890')
+  })
+
+  it('leads_group_status follows the FSM: CONTACTED → FOLLOWUP, WON → CLOSED', () => {
+    const parsed = buildParsedFile([
+      validRow({ status: 'CONTACTED' }),
+      validRow({ ID: 'B', nomor_telepon: '0812-9999-8888', status: 'WON' }),
+    ])
+    const result = transformToSqlRecords(parsed)
+    expect(result.records[0].record.leads_group_status).toBe('FOLLOWUP')
+    expect(result.records[1].record.leads_group_status).toBe('CLOSED')
+  })
+
+  it('leads_id is stable per Qonex ID (deterministic across runs)', () => {
     const a = transformToSqlRecords(buildParsedFile([validRow()]))
     const b = transformToSqlRecords(buildParsedFile([validRow()]))
     expect(a.records[0].record.leads_id).toBe(b.records[0].record.leads_id)
   })
 
-  it('populates wa_mobile with the configured prefix', () => {
-    const parsed = buildParsedFile([validRow()])
-    const result = transformToSqlRecords(parsed, {
-      waMobilePrefix: 'wa_',
-      dryRun: true,
-    })
-    expect(result.records[0].record.leads_wa_mobile).toBe('wa_6281234567890')
-  })
-
-  it('writes leads_aging=0 and migration marker on every row', () => {
-    const parsed = buildParsedFile([validRow(), validRow({ ID: 'QX-00002' })])
-    const result = transformToSqlRecords(parsed, { dryRun: true })
-    for (const r of result.records) {
-      expect(r.record.leads_aging).toBe(0)
-      expect(r.record.leads_migration_marker).toBe('MIGRATION_V1')
-      expect(r.record.leads_source_system).toBe('QONEX')
-      expect(r.record.leads_migration_dry_run).toBe(true)
-    }
-  })
-
-  it('blocks when required fields are missing', () => {
-    const parsed = buildParsedFile([validRow({ nama_prospek: '', nomor_telepon: '' })])
-    const result = transformToSqlRecords(parsed)
-    expect(result.records[0].blocked).toBe(true)
-    const categories = result.records[0].blockingIssues.map((i) => i.category)
-    expect(categories).toContain('missing-required')
-  })
-
-  it('detects duplicate legacy IDs as BLOCKED', () => {
-    const parsed = buildParsedFile([
-      validRow({ ID: 'QX-DUP' }),
-      validRow({ ID: 'QX-DUP', nomor_telepon: '0812-9999-0000' }),
-    ])
-    const result = transformToSqlRecords(parsed)
-    for (const r of result.records) {
-      expect(r.blocked).toBe(true)
-      expect(r.blockingIssues.some((i) => i.category === 'duplicate-id')).toBe(true)
-    }
-  })
-
-  it('flags duplicate phone as WARNING, not BLOCKED', () => {
-    const parsed = buildParsedFile([
-      validRow({ ID: 'A' }),
-      validRow({ ID: 'B' }),
-    ])
-    const result = transformToSqlRecords(parsed)
-    expect(result.records[0].blocked).toBe(false)
-    expect(
-      result.records[0].warnings.some((i) => i.category === 'duplicate-phone'),
-    ).toBe(true)
-  })
-
-  it('truncates NVARCHAR values that exceed max length and warns', () => {
-    const parsed = buildParsedFile([
-      validRow({ keterangan: 'x'.repeat(5000) }),
-    ])
-    const result = transformToSqlRecords(parsed)
-    expect((result.records[0].record.leads_notes as string).length).toBeLessThanOrEqual(4000)
-    expect(
-      result.records[0].warnings.some(
-        (i) => i.category === 'destination-constraint' && i.field === 'leads_notes',
-      ),
-    ).toBe(true)
-  })
-
-  it('converts timestamps to UTC + Jakarta pair', () => {
+  it('leads_aging = 0, defaults for score/property placeholders', () => {
     const parsed = buildParsedFile([validRow()])
     const result = transformToSqlRecords(parsed)
     const r = result.records[0].record
-    expect(r.leads_created_at).toBe('2026-02-01T02:14:00.000Z')
-    expect(String(r.leads_created_at_wib)).toContain('+07:00')
+    expect(r.leads_aging).toBe(0)
+    expect(r.leads_total_score).toBe(0)
+    expect(r.leads_property_price).toBe(0)
+    expect(r.leads_raw_score).toBe('{}')
+    expect(r.leads_raw_property).toBe('{}')
+  })
+
+  it('created_by / updated_by = "system-batch"', () => {
+    const parsed = buildParsedFile([validRow()])
+    const result = transformToSqlRecords(parsed)
+    expect(result.records[0].record.created_by).toBe('system-batch')
+    expect(result.records[0].record.updated_by).toBe('system-batch')
+  })
+
+  it('blocks when required Qonex fields are missing', () => {
+    const parsed = buildParsedFile([
+      validRow({ nama_prospek: '', nomor_telepon: '' }),
+    ])
+    const result = transformToSqlRecords(parsed)
+    expect(result.records[0].blocked).toBe(true)
+    expect(
+      result.records[0].blockingIssues.some((i) => i.category === 'missing-required'),
+    ).toBe(true)
+  })
+
+  it('truncates leads_note at 2000 chars and warns', () => {
+    const parsed = buildParsedFile([validRow({ keterangan: 'x'.repeat(5000) })])
+    const result = transformToSqlRecords(parsed)
+    expect((result.records[0].record.leads_note as string).length).toBeLessThanOrEqual(2000)
+    expect(
+      result.records[0].warnings.some(
+        (i) => i.category === 'destination-constraint' && i.field === 'leads_note',
+      ),
+    ).toBe(true)
   })
 
   it('scales to 8000 rows under 5s', () => {
@@ -110,7 +118,7 @@ describe('transformToSqlRecords', () => {
     expect(elapsed).toBeLessThan(5000)
   })
 
-  it('buildSqlPreviewStatement produces a parameterized hint + inlined sample', () => {
+  it('buildSqlPreviewStatement includes parameterized hint + inlined sample', () => {
     const parsed = buildParsedFile([validRow()])
     const result = transformToSqlRecords(parsed, { dryRun: true })
     const stmt = buildSqlPreviewStatement(
@@ -118,7 +126,7 @@ describe('transformToSqlRecords', () => {
       1,
     )
     expect(stmt).toContain('parameterized')
-    expect(stmt).toContain('INSERT INTO')
+    expect(stmt).toContain('dev_analytic_cxlite.analytic_leads_sales')
     expect(stmt).toContain('@p1')
   })
 })

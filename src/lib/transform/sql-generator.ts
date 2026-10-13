@@ -1,33 +1,37 @@
 /**
  * Qonex → dev_analytic_cxlite.analytic_leads_sales transformer.
  *
- * Produces one snapshot row per lead (initial-snapshot POC — no event history
- * is generated and no `eventlog` is populated). The transformer is pure: no
- * database access, no network, no side effects beyond building objects. The
- * accompanying adapter (`src/lib/adapters/sql-adapter.ts`) is responsible for
- * eventually turning these objects into real INSERTs.
+ * Authoritative schema: see src/config/sql-mapping.ts (sourced from
+ * analytics-sqlserver-lemons.md). The POC writes ONE snapshot row per lead
+ * (`event_name = 'LEAD_CREATED'`) and leaves the `eventlog` table empty.
+ *
+ * All identifiers (`id`, `leads_id`) are UUIDv4 strings stored as varchar.
+ * `leads_id` is stable per Qonex ID so a re-run reconciles cleanly.
  */
 
 import type { ParsedFile } from '@/types'
 import {
   clampVarchar,
+  digitsPhone,
   isBlank,
   normalizeEmail,
   normalizePhone,
   parseDate,
   safeNumericString,
-  toBoolean,
-  toDecimal,
   toInteger,
   trimString,
   waMobileId,
 } from './primitives'
-import { newRunId, stableHashId, stableUuid } from './identifiers'
+import { newRunId, stableUuid } from './identifiers'
 import {
   SQL_ANALYTIC_LEADS_SALES_COLUMNS,
   SQL_TARGET_TABLE,
 } from '@/config/sql-mapping'
-import { mapStatus } from '@/config/status-taxonomy'
+import {
+  cxliteSource,
+  sqlGroupStatus,
+  sqlStatusUpper,
+} from '@/config/status-taxonomy'
 import type {
   TransformContext,
   TransformIssue,
@@ -35,8 +39,11 @@ import type {
   TransformedRecord,
 } from './types'
 
-const DRY_RUN_MARKER = 'MIGRATION_V1'
-const SOURCE_SYSTEM = 'QONEX'
+const SYSTEM_USER = 'system-batch'
+const DEFAULT_QUAL = 'Medium'
+const DEFAULT_URGENCY = 'Medium'
+const PARENT_CHANNEL = 'ONLINE'
+const EVENT_LEAD_CREATED = 'LEAD_CREATED'
 
 export interface SqlRecord {
   [column: string]: string | number | boolean | null
@@ -61,9 +68,8 @@ export function transformToSqlRecords(
   }
 
   const records: Array<TransformedRecord<SqlRecord>> = []
-  const seenLegacyIds = new Map<string, number[]>()
-  const seenPhones = new Map<string, number[]>()
   const seenLeadsIds = new Map<string, number[]>()
+  const seenParentIds = new Map<string, number[]>()
   const allIssues: TransformIssue[] = []
 
   for (let i = 0; i < parsed.rows.length; i++) {
@@ -73,28 +79,12 @@ export function transformToSqlRecords(
     records.push(transformed)
     allIssues.push(...transformed.issues)
 
-    const legacy = transformed.record.leads_legacy_id as string | null
-    if (legacy) pushMap(seenLegacyIds, legacy, rowIndex)
-    const phone = transformed.record.leads_customer_phone as string | null
-    if (phone) pushMap(seenPhones, phone, rowIndex)
-    const id = transformed.record.leads_id as string | null
-    if (id) pushMap(seenLeadsIds, id, rowIndex)
+    const leadsId = transformed.record.leads_id as string | null
+    if (leadsId) pushMap(seenLeadsIds, leadsId, rowIndex)
+    const parentId = transformed.record.leads_parent_id as string | null
+    if (parentId) pushMap(seenParentIds, parentId, rowIndex)
   }
 
-  for (const [id, rows] of seenLegacyIds.entries()) {
-    if (rows.length > 1) {
-      for (const r of rows) {
-        attachBlocking(records, r, {
-          severity: 'BLOCKED',
-          category: 'duplicate-id',
-          field: 'leads_legacy_id',
-          message: `Duplicate legacy ID "${id}" appears on rows ${rows.join(', ')}`,
-          rowIndex: r,
-          originalValue: id,
-        })
-      }
-    }
-  }
   for (const [id, rows] of seenLeadsIds.entries()) {
     if (rows.length > 1) {
       for (const r of rows) {
@@ -102,29 +92,27 @@ export function transformToSqlRecords(
           severity: 'BLOCKED',
           category: 'duplicate-id',
           field: 'leads_id',
-          message: `Duplicate stable UUID "${id}" generated for rows ${rows.join(', ')} (upstream legacy IDs collide)`,
+          message: `Duplicate leads_id "${id}" generated for rows ${rows.join(', ')} (upstream Qonex IDs collide)`,
           rowIndex: r,
           originalValue: id,
         })
       }
     }
   }
-  for (const [phone, rows] of seenPhones.entries()) {
+  for (const [parent, rows] of seenParentIds.entries()) {
     if (rows.length > 1) {
       for (const r of rows) {
         attachWarning(records, r, {
           severity: 'WARNING',
           category: 'duplicate-phone',
-          field: 'leads_customer_phone',
-          message: `Phone ${phone} appears on rows ${rows.join(', ')} — business must decide duplicate policy`,
+          field: 'leads_parent_id',
+          message: `Phone-derived parent id ${parent} appears on rows ${rows.join(', ')} — business must decide duplicate policy`,
           rowIndex: r,
-          originalValue: phone,
+          originalValue: parent,
         })
       }
     }
   }
-
-  const summary = summarize(records)
 
   return {
     runId: context.runId,
@@ -133,7 +121,7 @@ export function transformToSqlRecords(
     transformedAt: context.now.toISOString(),
     records,
     issues: allIssues,
-    summary,
+    summary: summarize(records),
   }
 }
 
@@ -153,23 +141,22 @@ function transformOneSqlRow(
   const salesRep = trimString(row['sales_rep'])
   const createDate = parseDate(row['create'])
   const updatedDate = parseDate(row['last_update'])
-  const nextActionDate = parseDate(row['next_action'])
-  const firstContactDate = parseDate(row['first_contact'])
-  const visitAtDate = parseDate(row['visit_at'])
-  const lat = toDecimal(row['lat'], 6)
-  const long = toDecimal(row['long'], 6)
-  const booked = toBoolean(row['bookmark'])
-  const price = safeNumericString(row['type_price'])
-  const groupVal = trimString(row['group'])
-  const notes = clampVarchar(row['keterangan'], 4000)
-  const statusInfo = mapStatus('sql', row['status'])
+  const sourceInfo = cxliteSource(row['source_data'])
+  const statusUpper = sqlStatusUpper(row['status'])
+  const groupStatus = sqlGroupStatus(row['status'])
+  const budget = safeNumericString(row['type_price'])
+  const notes = clampVarchar(row['keterangan'], 2000)
+  const company = trimString(row['group'])
+  const cluster = trimString(row['cluster'])
+  const phoneDigits = digitsPhone(phoneResult)
+  const parentWa = waMobileId(phoneResult, ctx.waMobilePrefix)
 
   if (!legacyId) {
     blockingIssues.push({
       severity: 'BLOCKED',
       category: 'missing-required',
-      field: 'leads_legacy_id',
-      message: 'Qonex ID is required.',
+      field: 'legacy_id',
+      message: 'Qonex ID is required (used to derive stable leads_id).',
       rowIndex,
       originalValue: row['ID'],
     })
@@ -201,27 +188,48 @@ function transformOneSqlRow(
       message: `Phone looks suspicious (${phoneResult.reason}).`,
       rowIndex,
       originalValue: row['nomor_telepon'],
-      proposedValue: phoneResult.normalized,
-    })
-  }
-  if (!salesRep) {
-    blockingIssues.push({
-      severity: 'BLOCKED',
-      category: 'missing-required',
-      field: 'leads_sales_rep',
-      message: 'Sales rep is required (analytic model expects assigned owner).',
-      rowIndex,
-      originalValue: row['sales_rep'],
+      proposedValue: phoneDigits,
     })
   }
   if (!createDate.valid) {
     blockingIssues.push({
       severity: 'BLOCKED',
       category: 'invalid-date',
-      field: 'leads_created_at',
+      field: 'leads_created_on',
       message: `Created timestamp could not be parsed (${createDate.reason}).`,
       rowIndex,
       originalValue: row['create'],
+    })
+  }
+  if (!statusUpper) {
+    blockingIssues.push({
+      severity: 'BLOCKED',
+      category: 'missing-required',
+      field: 'leads_status',
+      message: 'Status is required.',
+      rowIndex,
+      originalValue: row['status'],
+    })
+  } else if (groupStatus === 'UNKNOWN') {
+    warnings.push({
+      severity: 'WARNING',
+      category: 'unknown-status',
+      field: 'leads_group_status',
+      message: `Status "${statusUpper}" does not match NEW/FOLLOWUP/CLOSED families; stored as UNKNOWN.`,
+      rowIndex,
+      originalValue: statusUpper,
+      proposedValue: 'UNKNOWN',
+    })
+  }
+  if (sourceInfo.original && !sourceInfo.known) {
+    warnings.push({
+      severity: 'WARNING',
+      category: 'unknown-source',
+      field: 'leads_source',
+      message: `Source "${sourceInfo.original}" is not in the CXLite taxonomy — preserved as-is.`,
+      rowIndex,
+      originalValue: sourceInfo.original,
+      proposedValue: sourceInfo.normalized,
     })
   }
   if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
@@ -235,119 +243,91 @@ function transformOneSqlRow(
       proposedValue: email,
     })
   }
-  if (lat.precisionLoss || long.precisionLoss) {
-    warnings.push({
-      severity: 'WARNING',
-      category: 'precision-loss',
-      field: lat.precisionLoss ? 'leads_latitude' : 'leads_longitude',
-      message: 'Geographic coordinate rounded to DECIMAL(9,6).',
-      rowIndex,
-      originalValue: lat.precisionLoss ? row['lat'] : row['long'],
-      proposedValue: lat.precisionLoss ? lat.value : long.value,
-    })
-  }
-  if (!statusInfo.known && statusInfo.original) {
-    warnings.push({
-      severity: 'WARNING',
-      category: 'unknown-status',
-      field: 'leads_status',
-      message: `Unknown status "${statusInfo.original}" — preserved as-is.`,
-      rowIndex,
-      originalValue: statusInfo.original,
-      proposedValue: statusInfo.normalized,
-    })
-  } else if (!statusInfo.original) {
-    blockingIssues.push({
-      severity: 'BLOCKED',
-      category: 'missing-required',
-      field: 'leads_status',
-      message: 'Status is required.',
-      rowIndex,
-      originalValue: row['status'],
-    })
-  }
   if (notes.truncated) {
     warnings.push({
       severity: 'WARNING',
       category: 'destination-constraint',
-      field: 'leads_notes',
-      message: 'Notes exceeded 4000 chars and were truncated for safety.',
+      field: 'leads_note',
+      message: 'Notes exceeded 2000 chars (varchar(2000)); truncated.',
       rowIndex,
       originalValue: String(row['keterangan']).slice(0, 50) + '…',
       proposedValue: notes.value,
     })
   }
 
-  const leadsIdSeed = `${legacyId ?? phoneResult.normalized ?? `row-${rowIndex}`}:${SOURCE_SYSTEM}`
+  const leadsIdSeed = `cxlite-sql:${legacyId ?? phoneDigits ?? `row-${rowIndex}`}`
+  const idSeed = `cxlite-sql-row:${ctx.runId}:${rowIndex}:${legacyId ?? ''}`
   const leadsId = stableUuid(leadsIdSeed)
-  const waMobile = waMobileId(phoneResult, ctx.waMobilePrefix)
+  const id = stableUuid(idSeed)
 
-  const createdAtUtc = createDate.utcIso
-  const createdAtWib = createDate.jakartaIso
+  const createdOnUtc = createDate.utcIso
+  const changedOnUtc = updatedDate.utcIso ?? createdOnUtc
+  const nowUtc = ctx.now.toISOString()
 
   const record: SqlRecord = {
+    id,
+    eventlog_id: null,
+    event_name: EVENT_LEAD_CREATED,
+    event_time: changedOnUtc,
+    leads_source: sourceInfo.normalized || sourceInfo.original || null,
+    leads_parent_channel: PARENT_CHANNEL,
+    leads_channel: (sourceInfo.normalized || sourceInfo.original || '').toUpperCase() || null,
+    leads_parent_id: parentWa,
     leads_id: leadsId,
-    leads_legacy_id: legacyId,
-    leads_wa_mobile: waMobile,
-    leads_customer_name: name,
-    leads_customer_phone: phoneResult.normalized,
-    leads_customer_email: email,
-    leads_status: statusInfo.normalized || null,
-    leads_status_detail: statusInfo.original,
-    leads_sub_status: trimString(row['cancel_reason']),
-    leads_cancel_reason: trimString(row['cancel_reason']),
-    leads_interest_type: trimString(row['interest_type']),
-    leads_price_tier: price.raw,
-    leads_price_numeric: price.numeric,
-    leads_source: trimString(row['source_data']),
-    leads_source_category: trimString(row['category_source']),
-    leads_exhibition_location: trimString(row['lokasi_pameran']),
-    leads_walkin_location: trimString(row['lokasi_walkin']),
-    leads_cluster: trimString(row['cluster']),
-    leads_group: groupVal,
-    leads_company: groupVal,
-    leads_sales_rep: salesRep,
-    leads_sales_rep_id: null,
+    leads_group_status: groupStatus,
+    leads_status: statusUpper,
+    leads_group_type: null,
+    leads_type: null,
+    leads_total_score: 0,
+    leads_raw_score: '{}',
+    leads_created_on: createdOnUtc,
+    leads_changed_on: changedOnUtc,
+    leads_created_by: salesRep,
     leads_assigned_to: salesRep,
-    leads_notes: notes.value,
-    leads_next_action: trimString(row['next_action']),
-    leads_created_at: createdAtUtc,
-    leads_created_at_wib: createdAtWib,
-    leads_updated_at: updatedDate.utcIso,
-    leads_next_action_at: nextActionDate.utcIso,
-    leads_first_contact_at: firstContactDate.utcIso,
-    leads_last_visit_at: visitAtDate.utcIso,
-    leads_latitude: lat.value,
-    leads_longitude: long.value,
-    leads_attachment_url: trimString(row['attachment']),
-    leads_bookmark: booked,
-    leads_progress_count: toInteger(row['total_progress']),
-    leads_wa_count: toInteger(row['total_wa']),
-    leads_call_count: toInteger(row['total_call']),
+    leads_assigned_by: salesRep,
+    leads_company: company,
+    leads_note: notes.value,
+    leads_qualification_level: DEFAULT_QUAL,
+    leads_customer_budget: budget.numeric !== null ? String(budget.numeric) : budget.raw,
+    leads_customer_name: name,
+    leads_customer_email: email,
+    leads_customer_phone: phoneDigits,
+    leads_customer_address: trimString(row['lokasi_walkin']),
+    leads_customer_ktp: '',
+    leads_project: trimString(row['group']) ?? company,
+    leads_cluster: cluster,
+    leads_urgency: DEFAULT_URGENCY,
+    leads_property_price: 0,
+    leads_raw_property: '{}',
+    leads_financing: null,
+    leads_timeline: null,
     leads_aging: 0,
-    leads_ad_name: trimString(row['ad_name']),
-    leads_adset_name: trimString(row['adset_name']),
-    leads_form_name: trimString(row['form_name']),
-    leads_campaign_name: trimString(row['campaign_name']),
-    leads_source_system: SOURCE_SYSTEM,
-    leads_migration_run_id: ctx.runId,
-    leads_migration_batch_id: `${ctx.runId}-B001`,
-    leads_migration_source_row: rowIndex,
-    leads_migration_marker: DRY_RUN_MARKER,
-    leads_migration_dry_run: ctx.dryRun,
-    leads_migrated_at: ctx.now.toISOString(),
-    leads_hash: '',
+    sales_id: null,
+    sales_name: salesRep,
+    sales_email: null,
+    sales_phone: null,
+    sales_manager_id: null,
+    sales_manager_name: salesRep,
+    sales_manager_phone: null,
+    sales_manager_email: null,
+    created_at: nowUtc,
+    created_by: SYSTEM_USER,
+    updated_at: nowUtc,
+    updated_by: SYSTEM_USER,
+    deleted_at: null,
+    deleted_by: null,
   }
 
   for (const col of SQL_ANALYTIC_LEADS_SALES_COLUMNS) {
-    if (col.sqlType === 'NVARCHAR' && col.maxLength && !isBlank(record[col.name])) {
-      const current = String(record[col.name])
+    const value = record[col.name]
+    if (col.sqlType === 'varchar' && col.maxLength && !isBlank(value)) {
+      const current = String(value)
       if (current.length > col.maxLength) {
         warnings.push({
           severity: 'WARNING',
           category: 'destination-constraint',
           field: col.name,
-          message: `Value exceeds NVARCHAR(${col.maxLength}); truncated.`,
+          message: `Value exceeds varchar(${col.maxLength}); truncated.`,
           rowIndex,
           originalValue: current,
           proposedValue: current.slice(0, col.maxLength),
@@ -355,25 +335,22 @@ function transformOneSqlRow(
         record[col.name] = current.slice(0, col.maxLength)
       }
     }
-    if (!col.nullable && (record[col.name] === null || record[col.name] === undefined)) {
+    if (!col.nullable && (value === null || value === undefined)) {
       blockingIssues.push({
         severity: 'BLOCKED',
         category: 'missing-required',
         field: col.name,
-        message: `Non-null SQL column ${col.name} resolved to NULL.`,
+        message: `NON-NULL SQL column ${col.name} resolved to NULL.`,
         rowIndex,
       })
     }
   }
 
-  const hashInput = JSON.stringify({
-    legacyId: record.leads_legacy_id,
-    phone: record.leads_customer_phone,
-    name: record.leads_customer_name,
-    createdAt: record.leads_created_at,
-    status: record.leads_status,
-  })
-  record.leads_hash = stableHashId(hashInput)
+  if (record.leads_customer_budget && String(record.leads_customer_budget).length > 100) {
+    record.leads_customer_budget = String(record.leads_customer_budget).slice(0, 100)
+  }
+
+  record.leads_property_price = toInteger(record.leads_property_price) ?? 0
 
   issues.push(...blockingIssues, ...warnings)
 
@@ -385,7 +362,7 @@ function transformOneSqlRow(
     warnings,
     blockingIssues,
     blocked: blockingIssues.length > 0,
-    hash: record.leads_hash as string,
+    hash: id,
     skipped: false,
   }
 }

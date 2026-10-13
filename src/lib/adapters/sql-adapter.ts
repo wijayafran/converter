@@ -29,6 +29,7 @@ export interface MockSqlAdapterOptions {
   failRowIndices?: number[]
   conflictHashes?: string[]
   latencyMs?: number
+  dryRun?: boolean
 }
 
 const MIGRATION_MARKER = 'MIGRATION_V1'
@@ -62,9 +63,10 @@ export function createMockSqlAdapter(
     async prepareBatch({ runId, batchIndex, records }): Promise<PreparedBatch<SqlRecord>> {
       await delay(latency)
       const batchId = newBatchId(runId, batchIndex)
-      const stamped: SqlRecord[] = records.map((r) => ({
+      const stamped: SqlRecord[] = records.map((r, idx) => ({
         ...r,
-        leads_migration_batch_id: batchId,
+        __source_row: idx + 1,
+        __batch_id: batchId,
       }))
       for (const col of SQL_ANALYTIC_LEADS_SALES_COLUMNS) {
         for (const r of stamped) {
@@ -95,8 +97,8 @@ export function createMockSqlAdapter(
       let failed = 0
       const perRecord: AdapterBatchResult<SqlRecord>['perRecord'] = []
       for (const record of batch.records) {
-        const hash = String(record.leads_hash ?? '')
-        const row = Number(record.leads_migration_source_row ?? 0)
+        const hash = String(record.id ?? record.leads_id ?? '')
+        const row = Number(record.__source_row ?? 0)
         if (options.failRowIndices?.includes(row)) {
           failed++
           perRecord.push({
@@ -119,7 +121,7 @@ export function createMockSqlAdapter(
           })
           continue
         }
-        if (record.leads_migration_dry_run === true) {
+        if (options.dryRun === true) {
           skipped++
           perRecord.push({
             recordHash: hash,
@@ -159,7 +161,7 @@ export function createMockSqlAdapter(
       const missing: string[] = []
       let verified = 0
       for (const r of batch.records) {
-        const hash = String(r.leads_hash ?? '')
+        const hash = String(r.id ?? '')
         if (insertedHashes.has(hash)) verified++
         else missing.push(hash)
       }
@@ -179,15 +181,15 @@ export function createMockSqlAdapter(
         }
       }
       const matching = batch.records
-        .map((r) => String(r.leads_id))
-        .filter((id) => insertedHashes.has(String(batch.records.find((x) => x.leads_id === id)?.leads_hash)))
+        .map((r) => String(r.id))
+        .filter((id) => insertedHashes.has(id))
       return {
         batchId,
         marker: MIGRATION_MARKER,
         wouldDelete: matching.length,
         sampleIds: matching.slice(0, 5),
         warnings: [
-          `Rollback is scoped to leads_migration_batch_id='${batchId}' AND leads_migration_marker='${MIGRATION_MARKER}'.`,
+          `Rollback is scoped to analytic_leads_sales rows whose created_by='system-batch' AND batch id='${batchId}' (tracked via internal __batch_id column alias).`,
           'MOCK adapter — the preview reflects simulated inserts, not real rows.',
         ],
       }
@@ -200,7 +202,7 @@ export function createMockSqlAdapter(
       const mismatched: string[] = []
       let observed = 0
       for (const r of batch.records) {
-        const hash = String(r.leads_hash ?? '')
+        const hash = String(r.id ?? '')
         const stored = insertedHashes.get(hash)
         if (!stored) {
           missing.push(hash)

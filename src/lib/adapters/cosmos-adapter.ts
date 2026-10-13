@@ -33,6 +33,7 @@ export interface MockCosmosAdapterOptions {
   failIds?: string[]
   conflictIds?: string[]
   latencyMs?: number
+  dryRun?: boolean
 }
 
 export function createMockCosmosAdapter(
@@ -109,7 +110,7 @@ export function createMockCosmosAdapter(
           })
           continue
         }
-        if (doc.migrationDryRun === true) {
+        if (options.dryRun === true) {
           skipped++
           perRecord.push({
             recordHash: doc.id,
