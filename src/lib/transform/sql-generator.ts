@@ -43,7 +43,14 @@ const SYSTEM_USER = 'system-batch'
 const DEFAULT_QUAL = 'Medium'
 const DEFAULT_URGENCY = 'Medium'
 const PARENT_CHANNEL = 'ONLINE'
-const EVENT_LEAD_CREATED = 'LEAD_CREATED'
+/**
+ * Constant creator / assigner for every row the migration produces.
+ * The authoritative mapping sources leads_created_by / leads_assigned_by
+ * from `data.createdBy` / `data.assignedBy`, which don't exist in Qonex;
+ * stamping a fixed migration identity keeps provenance auditable without
+ * silently coercing a Qonex sales rep into those columns.
+ */
+const DATA_MIGRATION_USER = 'DataMigration01'
 
 export interface SqlRecord {
   [column: string]: string | number | boolean | null
@@ -68,6 +75,7 @@ export function transformToSqlRecords(
   }
 
   const records: Array<TransformedRecord<SqlRecord>> = []
+  const seenPkIds = new Map<string, number[]>()
   const seenLeadsIds = new Map<string, number[]>()
   const seenParentIds = new Map<string, number[]>()
   const allIssues: TransformIssue[] = []
@@ -79,12 +87,32 @@ export function transformToSqlRecords(
     records.push(transformed)
     allIssues.push(...transformed.issues)
 
+    const pkId = transformed.record.id as string | null
+    if (pkId) pushMap(seenPkIds, pkId, rowIndex)
     const leadsId = transformed.record.leads_id as string | null
     if (leadsId) pushMap(seenLeadsIds, leadsId, rowIndex)
     const parentId = transformed.record.leads_parent_id as string | null
     if (parentId) pushMap(seenParentIds, parentId, rowIndex)
   }
 
+  // The analytic_leads_sales primary key is `id`. Under the WA_MOBILE
+  // convention, duplicate phones in the source produce duplicate ids,
+  // which would hit SQL error 2627 on insert. Block pre-emptively so the
+  // migration manifest surfaces the collision before the batch is sent.
+  for (const [id, rows] of seenPkIds.entries()) {
+    if (rows.length > 1) {
+      for (const r of rows) {
+        attachBlocking(records, r, {
+          severity: 'BLOCKED',
+          category: 'duplicate-id',
+          field: 'id',
+          message: `Duplicate PK id "${id}" (WA_MOBILE identifier collides on rows ${rows.join(', ')} — Qonex source must dedupe by phone before migration)`,
+          rowIndex: r,
+          originalValue: id,
+        })
+      }
+    }
+  }
   for (const [id, rows] of seenLeadsIds.entries()) {
     if (rows.length > 1) {
       for (const r of rows) {
@@ -106,7 +134,7 @@ export function transformToSqlRecords(
           severity: 'WARNING',
           category: 'duplicate-phone',
           field: 'leads_parent_id',
-          message: `Phone-derived parent id ${parent} appears on rows ${rows.join(', ')} — business must decide duplicate policy`,
+          message: `Phone-derived parent id ${parent} appears on rows ${rows.join(', ')} — resolved as BLOCKED on id above`,
           rowIndex: r,
           originalValue: parent,
         })
@@ -256,18 +284,23 @@ function transformOneSqlRow(
   }
 
   const leadsIdSeed = `cxlite-sql:${legacyId ?? phoneDigits ?? `row-${rowIndex}`}`
-  const idSeed = `cxlite-sql-row:${ctx.runId}:${rowIndex}:${legacyId ?? ''}`
   const leadsId = stableUuid(leadsIdSeed)
-  const id = stableUuid(idSeed)
+  // `id` follows the WA_MOBILE identifier convention (configurable prefix,
+  // default `wa_<digitsPhone>`). When the phone cannot be normalized the
+  // row is already blocked above; we still populate `id` with a stable
+  // placeholder so the manifest can reference the blocked row.
+  const id =
+    parentWa ??
+    `${ctx.waMobilePrefix}invalid-${stableUuid(leadsIdSeed).slice(0, 8)}`
 
   const createdOnUtc = createDate.utcIso
-  const changedOnUtc = updatedDate.utcIso ?? createdOnUtc
+  const changedOnUtc = updatedDate.utcIso
   const nowUtc = ctx.now.toISOString()
 
   const record: SqlRecord = {
     id,
     eventlog_id: null,
-    event_name: EVENT_LEAD_CREATED,
+    event_name: null,
     event_time: changedOnUtc,
     leads_source: sourceInfo.normalized || sourceInfo.original || null,
     leads_parent_channel: PARENT_CHANNEL,
@@ -281,10 +314,10 @@ function transformOneSqlRow(
     leads_total_score: 0,
     leads_raw_score: '{}',
     leads_created_on: createdOnUtc,
-    leads_changed_on: changedOnUtc,
-    leads_created_by: salesRep,
+    leads_changed_on: changedOnUtc ?? createdOnUtc,
+    leads_created_by: DATA_MIGRATION_USER,
     leads_assigned_to: salesRep,
-    leads_assigned_by: salesRep,
+    leads_assigned_by: DATA_MIGRATION_USER,
     leads_company: company,
     leads_note: notes.value,
     leads_qualification_level: DEFAULT_QUAL,
@@ -307,7 +340,7 @@ function transformOneSqlRow(
     sales_email: null,
     sales_phone: null,
     sales_manager_id: null,
-    sales_manager_name: salesRep,
+    sales_manager_name: DATA_MIGRATION_USER,
     sales_manager_phone: null,
     sales_manager_email: null,
     created_at: nowUtc,
