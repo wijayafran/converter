@@ -1,4 +1,5 @@
 export * from './types'
 export * from './sql-adapter'
+export * from './http-sql-adapter'
 export * from './cosmos-adapter'
 export * from './lemon-vireya'

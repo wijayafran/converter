@@ -42,6 +42,9 @@ export function WorkflowPage() {
     result,
     batchProgress,
     batchManifest,
+    executionMode,
+    backendProbe,
+    backendProbeError,
     startWorkflow,
     setStep,
     setParsedFile,
@@ -49,6 +52,8 @@ export function WorkflowPage() {
     runValidation,
     decideIssue,
     simulateMigration,
+    setExecutionMode,
+    probeBackend,
   } = useWorkflowStore()
 
   useEffect(() => {
@@ -163,6 +168,11 @@ export function WorkflowPage() {
           destination={destination}
           parsedFile={parsedFile}
           issues={issues}
+          executionMode={executionMode}
+          backendProbe={backendProbe}
+          backendProbeError={backendProbeError}
+          onProbeBackend={probeBackend}
+          onExecutionModeChange={setExecutionMode}
           onConfirm={() => {
             setStep('result')
             void simulateMigration()

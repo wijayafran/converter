@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { Download, PlayCircle, ShieldAlert } from 'lucide-react'
+import { Activity, Download, PlayCircle, ShieldAlert } from 'lucide-react'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -21,11 +21,18 @@ import {
 } from '@/lib/transform'
 import { downloadJson } from '@/lib/download'
 import type { Destination, ParsedFile, ValidationIssue } from '@/types'
+import type { AdapterConnectionProbe } from '@/lib/adapters/types'
+import { COSMOS_DEV_STATUS, type ExecutionMode } from '@/state/workflow-store'
 
 interface Props {
   destination: Destination
   parsedFile: ParsedFile
   issues: ValidationIssue[]
+  executionMode: ExecutionMode
+  backendProbe: AdapterConnectionProbe | null
+  backendProbeError: string | null
+  onProbeBackend: () => Promise<void> | void
+  onExecutionModeChange: (mode: ExecutionMode) => void
   onConfirm: () => void
 }
 
@@ -33,6 +40,11 @@ export function PreviewStep({
   destination,
   parsedFile,
   issues,
+  executionMode,
+  backendProbe,
+  backendProbeError,
+  onProbeBackend,
+  onExecutionModeChange,
   onConfirm,
 }: Props) {
   const [confirmOpen, setConfirmOpen] = useState(false)
@@ -96,6 +108,10 @@ export function PreviewStep({
       ? sqlOutput?.records.length ?? 0
       : cosmosOutput?.leads.length ?? 0
 
+  const isSql = destination === 'sql'
+  const isLive = isSql && executionMode === 'SQL_LOCAL_TEST'
+  const backendOk = backendProbe?.ok === true
+
   return (
     <div className="flex flex-col gap-6">
       <div className="grid gap-3 md:grid-cols-4">
@@ -105,12 +121,100 @@ export function PreviewStep({
         <SummaryTile label="Blocked" value={blocked} tone="destructive" />
       </div>
 
-      <Alert variant="warning">
-        <AlertTitle>DRY RUN — no production writes</AlertTitle>
+      {isSql ? (
+        <div className="flex flex-col gap-3 rounded-lg border border-border bg-background p-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <p className="section-heading">Execution mode</p>
+              <p className="text-xs text-muted-foreground">
+                Dry Run tidak menulis apa pun. SQL Local Test memanggil
+                backend lokal yang menulis ke container{' '}
+                <code className="font-mono text-[11px]">lemons-mssql</code>.
+              </p>
+            </div>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => onExecutionModeChange('DRY_RUN')}
+                className="focus:outline-none"
+              >
+                <Badge
+                  variant={executionMode === 'DRY_RUN' ? 'default' : 'outline'}
+                  className="cursor-pointer uppercase"
+                >
+                  Dry Run
+                </Badge>
+              </button>
+              <button
+                type="button"
+                onClick={() => onExecutionModeChange('SQL_LOCAL_TEST')}
+                className="focus:outline-none"
+              >
+                <Badge
+                  variant={executionMode === 'SQL_LOCAL_TEST' ? 'default' : 'outline'}
+                  className="cursor-pointer uppercase"
+                >
+                  SQL Local Test
+                </Badge>
+              </button>
+            </div>
+          </div>
+
+          {executionMode === 'SQL_LOCAL_TEST' && (
+            <div className="flex flex-wrap items-center gap-3 rounded-md border border-border bg-muted/30 p-3 text-xs">
+              <Activity
+                className={`h-4 w-4 ${
+                  backendOk
+                    ? 'text-[hsl(var(--success))]'
+                    : backendProbeError
+                      ? 'text-[hsl(var(--destructive))]'
+                      : 'text-muted-foreground'
+                }`}
+              />
+              <span className="font-medium">Backend</span>
+              {backendProbe ? (
+                <span className="text-muted-foreground">
+                  {backendProbe.destinationLabel} ·{' '}
+                  <span className="font-mono">{backendProbe.mode}</span> ·{' '}
+                  latency {backendProbe.latencyMs}ms
+                </span>
+              ) : backendProbeError ? (
+                <span className="text-[hsl(var(--destructive))]">
+                  {backendProbeError}
+                </span>
+              ) : (
+                <span className="text-muted-foreground">Belum diprobe</span>
+              )}
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => onProbeBackend()}
+                className="ml-auto"
+              >
+                Probe backend
+              </Button>
+            </div>
+          )}
+        </div>
+      ) : (
+        <Alert variant="warning">
+          <AlertTitle>Cosmos DEV integration pending</AlertTitle>
+          <AlertDescription>{COSMOS_DEV_STATUS}</AlertDescription>
+        </Alert>
+      )}
+
+      <Alert variant={isLive ? 'info' : 'warning'}>
+        <AlertTitle>
+          {isLive
+            ? 'SQL Local Test — writes to lemons-mssql'
+            : 'DRY RUN — no writes'}
+        </AlertTitle>
         <AlertDescription>
-          {destination === 'lemon'
-            ? 'Output ini di-generate dengan DRY_RUN=true. MOCK Cosmos adapter menolak insert ke container nyata hingga backend Phase 2 tersedia.'
-            : 'Output ini di-generate dengan DRY_RUN=1. MOCK SQL adapter menolak INSERT ke SQL Server nyata hingga backend Phase 2 tersedia.'}
+          {isLive
+            ? 'Backend akan INSERT ke dev_analytic_cxlite.analytic_leads_sales, dilanjutkan read-back verification. Tabel eventlog tidak disentuh.'
+            : destination === 'lemon'
+              ? 'Cosmos lokal dinonaktifkan di Phase 2B. Semua angka adalah output MOCK; tidak ada tulisan ke database apa pun.'
+              : 'Mode DRY RUN pakai MOCK adapter. Tidak ada tulisan ke lemons-mssql. Pilih SQL Local Test untuk mengeksekusi.'}
         </AlertDescription>
       </Alert>
 
@@ -134,7 +238,7 @@ export function PreviewStep({
                   </Badge>
                 </button>
               ))}
-              <Badge variant="muted">MOCK</Badge>
+              <Badge variant="muted">MOCK · DEV pending</Badge>
             </div>
           </div>
 
@@ -191,9 +295,9 @@ export function PreviewStep({
               <Download className="h-4 w-4" />
               Download batch array
             </Button>
-            <Button variant="outline" disabled title="Phase 2">
+            <Button variant="outline" disabled title="Pending Azure DEV + Lemon Vireya contract">
               <ShieldAlert className="h-4 w-4" />
-              Submit via Lemon Vireya (Phase 2 · stub)
+              Submit via Lemon Vireya (pending)
             </Button>
           </div>
         </div>
@@ -216,13 +320,9 @@ export function PreviewStep({
               <Download className="h-4 w-4" />
               Download SQL rows (JSON)
             </Button>
-            <Button variant="outline" disabled title="Phase 2">
-              <ShieldAlert className="h-4 w-4" />
-              Test Connection (Phase 2)
-            </Button>
-            <Button variant="outline" disabled title="Phase 2">
-              <ShieldAlert className="h-4 w-4" />
-              Execute INSERT (Phase 2)
+            <Button variant="outline" onClick={() => onProbeBackend()}>
+              <Activity className="h-4 w-4" />
+              Probe backend health
             </Button>
           </div>
         </div>
@@ -231,31 +331,40 @@ export function PreviewStep({
       <div className="rounded-lg border border-border bg-background p-5">
         <div className="flex flex-col items-start justify-between gap-4 sm:flex-row sm:items-center">
           <div>
-            <h3 className="text-base font-medium">Confirm & run (DRY RUN)</h3>
+            <h3 className="text-base font-medium">
+              {isLive ? 'Confirm & run SQL Local Test' : 'Confirm & run (DRY RUN)'}
+            </h3>
             <p className="text-sm text-muted-foreground">
-              Batch engine akan dijalankan dengan MOCK adapter. Tidak ada
-              penulisan ke sistem produksi.
+              {isLive
+                ? 'Backend akan menerima batch, INSERT ke SQL, lalu verifikasi read-back. Credentials tetap di server.'
+                : 'Batch engine akan dijalankan dengan MOCK adapter. Tidak ada penulisan ke sistem apa pun.'}
             </p>
           </div>
           <Button
             onClick={() => setConfirmOpen(true)}
-            disabled={blocked > 0 || transformedCount === 0}
+            disabled={
+              blocked > 0 ||
+              transformedCount === 0 ||
+              (isLive && !backendOk)
+            }
           >
             <PlayCircle className="h-4 w-4" />
-            Confirm & run migration (DRY RUN)
+            {isLive ? 'Confirm & run SQL Local Test' : 'Confirm & run migration (DRY RUN)'}
           </Button>
         </div>
       </div>
 
       <ConfirmationDialog
         open={confirmOpen}
-        title="Konfirmasi DRY RUN migrasi"
-        description={`Batch engine akan dijalankan untuk ${transformedCount.toLocaleString(
-          'id-ID',
-        )} record ke tujuan ${
-          destination === 'lemon' ? 'LEMONS / Cosmos DB' : 'SQL Server · analytic_leads_sales'
-        }. Semua tulisan ditandai DRY_RUN=1 dan MOCK adapter menolak eksekusi produksi.`}
-        confirmLabel="Jalankan DRY RUN"
+        title={isLive ? 'Konfirmasi SQL Local Test' : 'Konfirmasi DRY RUN migrasi'}
+        description={
+          isLive
+            ? `Backend akan menerima ${transformedCount.toLocaleString('id-ID')} record dan menulisnya ke dev_analytic_cxlite.analytic_leads_sales pada container lemons-mssql, lalu memverifikasi dengan SELECT. Tabel eventlog tidak akan diubah.`
+            : `Batch engine akan dijalankan untuk ${transformedCount.toLocaleString('id-ID')} record ke tujuan ${
+                destination === 'lemon' ? 'Cosmos (MOCK · DEV pending)' : 'SQL (MOCK)'
+              }. Tidak ada tulisan ke database apa pun.`
+        }
+        confirmLabel={isLive ? 'Jalankan SQL Local Test' : 'Jalankan DRY RUN'}
         onConfirm={() => {
           setConfirmOpen(false)
           onConfirm()
