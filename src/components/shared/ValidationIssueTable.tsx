@@ -1,5 +1,6 @@
 import { CheckCircle2, CircleSlash, Undo2 } from 'lucide-react'
 import type { ValidationIssue } from '@/types'
+import { canOverride } from '@/lib/validation'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -131,9 +132,10 @@ function IssueActions({
       </div>
     )
   }
+  const overridable = canOverride(issue)
   return (
     <div className="flex items-center gap-2">
-      {issue.severity === 'WARNING' && (
+      {issue.severity === 'WARNING' && overridable && (
         <Button
           variant="outline"
           size="sm"
@@ -142,6 +144,11 @@ function IssueActions({
           <CheckCircle2 className="h-3.5 w-3.5" />
           Setujui
         </Button>
+      )}
+      {issue.severity === 'WARNING' && !overridable && (
+        <Badge variant="muted" title="Structural warning — cannot be overridden">
+          Not overridable
+        </Badge>
       )}
       <Button
         variant="ghost"

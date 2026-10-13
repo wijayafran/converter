@@ -17,18 +17,19 @@ export function ValidationStep({ totalRecords, issues, onRun }: Props) {
   return (
     <div className="flex flex-col gap-6">
       <Alert variant="info">
-        <AlertTitle>Mock validation engine</AlertTitle>
+        <AlertTitle>Real validation engine</AlertTitle>
         <AlertDescription>
-          Pada Phase 1, hasil validasi menggunakan dataset ilustratif agar user
-          dapat menguji seluruh alur. Pada Phase 2, modul validasi akan
-          menjalankan aturan sesungguhnya terhadap setiap baris Excel.
+          Setiap baris Excel diperiksa oleh engine deterministik (phone,
+          email, status, duplicate ID, won requirements, SQL varchar length,
+          precision loss, dsb). Hasil ini bukan simulasi — ini output nyata
+          dari transformer.
         </AlertDescription>
       </Alert>
 
       {!hasRun ? (
         <EmptyState
           title="Validasi belum dijalankan"
-          description={`Siap untuk memeriksa ${totalRecords.toLocaleString('id-ID')} baris data terhadap aturan dasar.`}
+          description={`Siap untuk memeriksa ${totalRecords.toLocaleString('id-ID')} baris data terhadap aturan destinasi.`}
           action={
             <Button onClick={onRun} className="mt-2">
               <PlayCircle className="h-4 w-4" />

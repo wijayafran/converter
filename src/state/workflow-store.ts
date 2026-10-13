@@ -7,9 +7,15 @@ import type {
   ValidationIssue,
   WizardStepId,
 } from '@/types'
-import { LEMON_FIELD_MAPPINGS } from '@/config/lemon-mapping'
+import { LEMON_FIELD_MAPPINGS } from '@/config/cosmos-mapping'
 import { SQL_FIELD_MAPPINGS } from '@/config/sql-mapping'
-import { buildMockIssues } from '@/mocks/validation'
+import { runValidation, type ValidationEngineOutput } from '@/lib/validation'
+import type { SqlRecord } from '@/lib/transform/sql-generator'
+import type { CosmosLeadDocument, CosmosWonDocument } from '@/lib/transform/cosmos-generator'
+import { createMockSqlAdapter } from '@/lib/adapters/sql-adapter'
+import { createMockCosmosAdapter, type CosmosWritable } from '@/lib/adapters/cosmos-adapter'
+import { createBatchRunner, type RunManifest, type RunProgress } from '@/lib/batch'
+import { newRunId } from '@/lib/transform/identifiers'
 
 interface WorkflowState {
   destination: Destination | null
@@ -18,6 +24,9 @@ interface WorkflowState {
   mappings: FieldMapping[]
   issues: ValidationIssue[]
   result: MigrationResultSummary | null
+  validation: ValidationEngineOutput | null
+  batchProgress: RunProgress | null
+  batchManifest: RunManifest<unknown> | null
 }
 
 interface WorkflowActions {
@@ -30,7 +39,7 @@ interface WorkflowActions {
     issueId: string,
     decision: 'approve' | 'exclude' | null,
   ) => void
-  simulateMigration: () => void
+  simulateMigration: () => Promise<void>
   reset: () => void
 }
 
@@ -46,6 +55,9 @@ const emptyState: WorkflowState = {
   mappings: [],
   issues: [],
   result: null,
+  validation: null,
+  batchProgress: null,
+  batchManifest: null,
 }
 
 export const useWorkflowStore = create<WorkflowState & WorkflowActions>(
@@ -73,9 +85,13 @@ export const useWorkflowStore = create<WorkflowState & WorkflowActions>(
       })),
 
     runValidation: () => {
-      const dest = get().destination
-      if (!dest) return
-      set({ issues: buildMockIssues(dest) })
+      const { destination, parsedFile } = get()
+      if (!destination || !parsedFile) return
+      const output = runValidation({ destination, parsed: parsedFile })
+      set({
+        issues: output.issues,
+        validation: output,
+      })
     },
 
     decideIssue: (issueId, decision) =>
@@ -85,42 +101,130 @@ export const useWorkflowStore = create<WorkflowState & WorkflowActions>(
         ),
       })),
 
-    simulateMigration: () => {
-      const { destination, parsedFile, issues } = get()
-      if (!destination || !parsedFile) return
-      const excluded = issues.filter((i) => i.decision === 'exclude').length
-      const blocked = issues.filter(
-        (i) => i.severity === 'BLOCKED' && i.decision !== 'exclude',
-      ).length
-      const total = parsedFile.rowCount
-      const successful = Math.max(0, total - excluded - blocked)
-      const now = new Date()
-      const started = new Date(now.getTime() - 4 * 1000)
-      set({
-        result: {
-          jobId: `SIM-${now.getTime().toString(36).toUpperCase()}`,
-          destination,
-          destinationLabel:
-            destination === 'lemon' ? 'Lemon / CXLite' : 'SQL Server',
-          totalRecords: total,
-          successful,
-          failed: 0,
-          skipped: excluded,
-          pending: blocked,
-          startedAt: started.toISOString(),
-          finishedAt: now.toISOString(),
-          simulated: true,
-          retryable: false,
-          notes: [
-            'Hasil ini merupakan simulasi. Tidak ada data yang dikirim ke sistem tujuan.',
-            destination === 'lemon'
-              ? 'Submit ke Lemon API dinonaktifkan hingga Phase 2.'
-              : 'Insert ke SQL Server dinonaktifkan hingga Phase 2.',
-          ],
-        },
-      })
+    simulateMigration: async () => {
+      const { destination, parsedFile, issues, validation } = get()
+      if (!destination || !parsedFile || !validation) return
+
+      const excludedRows = new Set(
+        issues
+          .filter((i) => i.decision === 'exclude')
+          .map((i) => i.rowIndex),
+      )
+
+      const runId = newRunId(destination === 'sql' ? 'SQLRUN' : 'COSRUN')
+      const started = new Date()
+
+      if (destination === 'sql') {
+        const records: SqlRecord[] =
+          validation.sqlResult?.records
+            .filter((r) => !r.blocked && !excludedRows.has(r.rowIndex))
+            .map((r) => r.record) ?? []
+        const adapter = createMockSqlAdapter()
+        const handle = createBatchRunner<SqlRecord>({
+          destination: 'sql',
+          adapter,
+          records,
+          batchSize: 500,
+          runId,
+          reconcileAfterEachBatch: true,
+          onProgress: (p) => set({ batchProgress: { ...p } }),
+        })
+        const manifest = await handle.completion
+        set({
+          batchManifest: manifest as RunManifest<unknown>,
+          result: toResultSummary({
+            destination,
+            runId,
+            started,
+            finished: new Date(),
+            total: records.length,
+            manifest,
+            excluded: excludedRows.size,
+            mode: adapter.mode,
+          }),
+        })
+      } else {
+        const leads = (validation.cosmosResult?.leads ?? [])
+          .filter((r) => !r.blocked && !excludedRows.has(r.rowIndex))
+          .map((r) => r.record as CosmosLeadDocument)
+        const won = (validation.cosmosResult?.wonSnapshots ?? [])
+          .filter((r) => !r.blocked && !excludedRows.has(r.rowIndex))
+          .map((r) => r.record as CosmosWonDocument)
+        const records: CosmosWritable[] = [...leads, ...won]
+        const adapter = createMockCosmosAdapter()
+        const handle = createBatchRunner<CosmosWritable>({
+          destination: 'cosmos',
+          adapter,
+          records,
+          batchSize: 500,
+          runId,
+          reconcileAfterEachBatch: true,
+          onProgress: (p) => set({ batchProgress: { ...p } }),
+        })
+        const manifest = await handle.completion
+        set({
+          batchManifest: manifest as RunManifest<unknown>,
+          result: toResultSummary({
+            destination,
+            runId,
+            started,
+            finished: new Date(),
+            total: leads.length,
+            manifest,
+            excluded: excludedRows.size,
+            mode: adapter.mode,
+            extraNotes: [
+              `Cosmos containers written (mock): leads=${leads.length}, leads-won=${won.length}`,
+            ],
+          }),
+        })
+      }
     },
 
     reset: () => set(emptyState),
   }),
 )
+
+interface ResultArgs {
+  destination: Destination
+  runId: string
+  started: Date
+  finished: Date
+  total: number
+  manifest: RunManifest<unknown>
+  excluded: number
+  mode: 'MOCK' | 'DRY_RUN' | 'LIVE'
+  extraNotes?: string[]
+}
+
+function toResultSummary(args: ResultArgs): MigrationResultSummary {
+  const { destination, runId, started, finished, manifest, excluded, mode } = args
+  const inserted = manifest.batches.reduce((n, b) => n + b.recordsInserted, 0)
+  const skipped = manifest.batches.reduce((n, b) => n + b.recordsSkipped, 0)
+  const failed = manifest.batches.reduce((n, b) => n + b.recordsFailed, 0)
+  const conflicts = manifest.batches.reduce((n, b) => n + b.recordsConflict, 0)
+  const notes: string[] = [
+    `Mode: ${mode} — ${mode === 'LIVE' ? 'production write' : 'simulated, no production data touched'}.`,
+    `Batches executed: ${manifest.batches.length}; retry queue: ${manifest.retryQueue.length}.`,
+    `Idempotency hashes recorded: ${manifest.idempotencyHashes.length}.`,
+    `Rows excluded by user decision: ${excluded}.`,
+    `Conflicts (idempotent skip): ${conflicts}.`,
+    ...(args.extraNotes ?? []),
+  ]
+  return {
+    jobId: runId,
+    destination,
+    destinationLabel:
+      destination === 'lemon' ? 'LEMONS / Cosmos DB' : 'SQL Server · analytic_leads_sales',
+    totalRecords: args.total,
+    successful: inserted,
+    failed,
+    skipped: skipped + excluded,
+    pending: Math.max(0, args.total - inserted - skipped - failed - conflicts),
+    startedAt: started.toISOString(),
+    finishedAt: finished.toISOString(),
+    simulated: mode !== 'LIVE',
+    retryable: manifest.retryQueue.length > 0 || failed > 0,
+    notes,
+  }
+}

@@ -38,11 +38,18 @@ export type IssueCategory =
   | 'missing-required'
   | 'invalid-type'
   | 'duplicate-id'
+  | 'duplicate-phone'
+  | 'duplicate-phone-assignee'
+  | 'id-collision'
   | 'invalid-date'
   | 'invalid-phone'
   | 'precision-loss'
   | 'mapping-incompatible'
   | 'destination-constraint'
+  | 'unknown-status'
+  | 'unknown-source'
+  | 'missing-won-field'
+  | 'partial-won'
 
 export interface ValidationIssue {
   id: string

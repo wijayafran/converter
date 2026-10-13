@@ -40,6 +40,8 @@ export function WorkflowPage() {
     mappings,
     issues,
     result,
+    batchProgress,
+    batchManifest,
     startWorkflow,
     setStep,
     setParsedFile,
@@ -162,14 +164,16 @@ export function WorkflowPage() {
           parsedFile={parsedFile}
           issues={issues}
           onConfirm={() => {
-            simulateMigration()
             setStep('result')
+            void simulateMigration()
           }}
         />
       )}
       {currentStep === 'result' && (
         <ResultStep
           result={result}
+          progress={batchProgress}
+          manifest={batchManifest}
           onStartOver={() => {
             startWorkflow(destination)
             navigate('/')
