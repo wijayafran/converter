@@ -30,9 +30,16 @@ import { newRunId } from '@/lib/transform/identifiers'
 
 export type ExecutionMode = 'DRY_RUN' | 'SQL_LOCAL_TEST'
 
+/**
+ * Browser-side backend base URL.
+ *
+ * Defaults to an empty string so that in-app `fetch('/api/...')` calls hit
+ * the Vite dev proxy on the same origin (no CORS, no hard-coded host). Set
+ * VITE_MIGRATION_SERVER_URL at build time to point at a specific backend
+ * (e.g., when the UI is served from a different host than the backend).
+ */
 export const BACKEND_BASE_URL =
-  (import.meta.env.VITE_MIGRATION_SERVER_URL as string | undefined) ??
-  'http://127.0.0.1:4318'
+  (import.meta.env.VITE_MIGRATION_SERVER_URL as string | undefined) ?? ''
 
 export const COSMOS_DEV_STATUS =
   'Cosmos DEV integration pending — awaiting Azure DEV credentials + Lemon Vireya API contract. Local emulator POC is deferred.'

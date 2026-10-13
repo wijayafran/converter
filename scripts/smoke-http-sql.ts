@@ -18,7 +18,9 @@ const BASE = process.env.MIGRATION_SERVER_URL ?? 'http://127.0.0.1:4318'
 
 async function main(): Promise<number> {
   console.log(`[smoke:http-sql] backend ${BASE}`)
-  const health = await fetch(`${BASE}/api/health`).then((r) => r.json())
+  const health = (await fetch(`${BASE}/api/health`).then((r) => r.json())) as {
+    mode: string
+  }
   if (health.mode !== 'LIVE') {
     console.error(
       `✗ backend is in ${health.mode}; start it with MIGRATION_LIVE=true (npm run server:live)`,

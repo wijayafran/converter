@@ -34,7 +34,10 @@ export interface HttpSqlAdapterOptions {
 export function createHttpSqlAdapter(
   options: HttpSqlAdapterOptions = {},
 ): DestinationAdapter<SqlRecord> {
-  const baseUrl = (options.baseUrl ?? 'http://127.0.0.1:4318').replace(/\/+$/, '')
+  // Empty baseUrl → use relative paths so the Vite dev proxy or any reverse
+  // proxy in production handles the host:port. Explicit value overrides.
+  const rawBase = options.baseUrl ?? ''
+  const baseUrl = rawBase.replace(/\/+$/, '')
   const autoApplyDdl = options.autoApplyDdl ?? true
   const fetchFn = options.fetchFn ?? fetch
   let ddlApplied = false

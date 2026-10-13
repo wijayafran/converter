@@ -5,9 +5,49 @@
  * file. Every value has a safe local-only default so a developer can run
  * `npm run server` without having to invent credentials, but LIVE mode
  * requires both the SQL password and the Cosmos emulator key.
+ *
+ * `.env` is auto-loaded on import if present. This matches what
+ * `node --env-file=.env` would do, but without relying on Node CLI flags
+ * (NODE_OPTIONS forbids `--env-file-if-exists`), and keeps the behaviour
+ * consistent across `npm run server`, `npm run poc:*`, and the smoke /
+ * verify scripts.
  */
 
+import fs from 'node:fs'
+import path from 'node:path'
 import 'node:process'
+
+loadDotEnvOnce()
+
+function loadDotEnvOnce() {
+  const marker = Symbol.for('lemons.dotenv.loaded')
+  const g = globalThis as unknown as Record<symbol, boolean>
+  if (g[marker]) return
+  g[marker] = true
+  const envPath = path.resolve(process.cwd(), '.env')
+  let text: string
+  try {
+    text = fs.readFileSync(envPath, 'utf-8')
+  } catch {
+    return
+  }
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim()
+    if (!line || line.startsWith('#')) continue
+    const eq = line.indexOf('=')
+    if (eq <= 0) continue
+    const key = line.slice(0, eq).trim()
+    let value = line.slice(eq + 1).trim()
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1)
+    }
+    // Never override values the caller already exported in the shell.
+    if (process.env[key] === undefined) process.env[key] = value
+  }
+}
 
 export interface ServerEnv {
   port: number
