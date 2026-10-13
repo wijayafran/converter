@@ -3,11 +3,13 @@ import { canOverride, runValidation } from '@/lib/validation'
 import { buildParsedFile, validRow, wonRow } from './fixtures'
 
 describe('validation engine', () => {
-  it('unknown status is a WARNING on SQL (preserved as UNKNOWN group)', () => {
+  it('unresolved status (no canonical mapping) is BLOCKED on SQL (not WARNING)', () => {
     const parsed = buildParsedFile([validRow({ status: 'MAYBE' })])
     const result = runValidation({ destination: 'sql', parsed })
-    const unknown = result.issues.find((i) => i.category === 'unknown-status')
-    expect(unknown?.severity).toBe('WARNING')
+    const unresolved = result.issues.find((i) => i.category === 'unresolved-status')
+    expect(unresolved).toBeDefined()
+    expect(unresolved?.severity).toBe('BLOCKED')
+    expect(canOverride(unresolved!)).toBe(false)
   })
 
   it('structural warnings cannot be overridden', () => {

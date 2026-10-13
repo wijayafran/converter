@@ -50,6 +50,16 @@ const STRUCTURAL_CATEGORIES = new Set([
   'invalid-date',
   'missing-won-field',
   'id-collision',
+  // The analytics-group classifier is required for valid downstream
+  // reporting. Unresolved and pending status mappings are NEVER
+  // overridable by a user acknowledgement — the migrator must either
+  // resolve the mapping in status-taxonomy.ts or exclude the row.
+  'unresolved-status',
+  'pending-status-mapping',
+  // Qonex-known source values whose CXLite canonical is a proposal
+  // awaiting Ecovia approval. Bulk-approving these would turn an
+  // unresolved mapping into silent policy; keep them structural.
+  'pending-source-mapping',
 ])
 
 export interface ValidationEngineInput {
@@ -176,7 +186,10 @@ function mapCategory(raw: string): IssueCategory {
     'mapping-incompatible',
     'destination-constraint',
     'unknown-status',
+    'unresolved-status',
+    'pending-status-mapping',
     'unknown-source',
+    'pending-source-mapping',
     'missing-won-field',
     'partial-won',
   ]
@@ -204,9 +217,21 @@ function recommendedAction(
     if (category === 'missing-won-field') {
       return 'Lengkapi field Won di sumber — tidak akan di-fabrikasi oleh engine.'
     }
+    if (category === 'unresolved-status') {
+      return 'Tambahkan canonical mapping di SQL_STATUS_RESOLUTIONS pada status-taxonomy.ts, atau kecualikan baris. Jangan setujui — grup FSM tidak boleh UNKNOWN.'
+    }
+    if (category === 'pending-status-mapping') {
+      return 'FSM group pending konfirmasi Ecovia. Jangan setujui massal — tunggu konfirmasi atau kecualikan baris.'
+    }
     return 'Perbaiki pada sumber sebelum dapat dilanjutkan.'
   }
   if (severity === 'WARNING') {
+    if (category === 'pending-source-mapping') {
+      return 'Nilai Qonex-dikenal; canonical CXLite usulan menunggu persetujuan Ecovia. Jangan setujui massal.'
+    }
+    if (category === 'unknown-source') {
+      return 'Nilai source tidak dikenal di Qonex maupun CXLite — periksa sumber Excel.'
+    }
     return 'Setujui jika nilai hasil normalisasi dapat diterima.'
   }
   return 'Tidak ada tindakan diperlukan.'

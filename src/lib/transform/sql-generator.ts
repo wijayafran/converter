@@ -27,9 +27,8 @@ import {
   SQL_TARGET_TABLE,
 } from '@/config/sql-mapping'
 import {
-  cxliteSource,
-  sqlGroupStatus,
-  sqlStatusUpper,
+  resolveQonexSource,
+  resolveQonexStatus,
 } from '@/config/status-taxonomy'
 import type {
   TransformContext,
@@ -177,9 +176,12 @@ function transformOneSqlRow(
   const salesRep = trimString(row['sales_rep'])
   const createDate = parseDate(row['create'])
   const updatedDate = parseDate(row['last_update'])
-  const sourceInfo = cxliteSource(row['source_data'])
-  const statusUpper = sqlStatusUpper(row['status'])
-  const groupStatus = sqlGroupStatus(row['status'])
+  // Single shared pipeline: raw → canonical → UPPER → FSM group.
+  // Both leads_status and leads_group_status are derived from the same call,
+  // closing the previous bug where raw-upper leaked into leads_status while
+  // the group classifier returned UNKNOWN.
+  const statusInfo = resolveQonexStatus(row['status'])
+  const sourceInfo = resolveQonexSource(row['source_data'])
   const budget = safeNumericString(row['type_price'])
   const noteRaw = trimString(row['keterangan'])
   const noteOverflow = noteRaw !== null && noteRaw.length > LEADS_NOTE_MAX
@@ -237,7 +239,7 @@ function transformOneSqlRow(
       originalValue: row['create'],
     })
   }
-  if (!statusUpper) {
+  if (!statusInfo.rawOriginal) {
     blockingIssues.push({
       severity: 'BLOCKED',
       category: 'missing-required',
@@ -246,27 +248,64 @@ function transformOneSqlRow(
       rowIndex,
       originalValue: row['status'],
     })
-  } else if (groupStatus === 'UNKNOWN') {
-    warnings.push({
-      severity: 'WARNING',
-      category: 'unknown-status',
+  } else if (statusInfo.group === 'UNKNOWN') {
+    // Analytics depends on leads_group_status; UNKNOWN is not acceptable
+    // and bulk-acknowledging it would hide an unresolved mapping. BLOCK
+    // the row with explicit original + proposed-null so the migrator
+    // either resolves the mapping or excludes the row.
+    blockingIssues.push({
+      severity: 'BLOCKED',
+      category: 'unresolved-status',
       field: 'leads_group_status',
-      message: `Status "${statusUpper}" does not match NEW/FOLLOWUP/CLOSED families; stored as UNKNOWN.`,
+      message: `No canonical mapping for Qonex status "${statusInfo.rawOriginal}" — resolve the mapping in status-taxonomy.ts (SQL_STATUS_RESOLUTIONS) before migrating.`,
       rowIndex,
-      originalValue: statusUpper,
-      proposedValue: 'UNKNOWN',
+      originalValue: statusInfo.rawOriginal,
+      proposedValue: null,
+    })
+  } else if (statusInfo.pending) {
+    // Canonical confirmed, FSM group pending. Not overridable: the
+    // generator refuses to silently classify this as any group, and
+    // mass-acknowledgement must not become a workaround.
+    blockingIssues.push({
+      severity: 'BLOCKED',
+      category: 'pending-status-mapping',
+      field: 'leads_group_status',
+      message: statusInfo.reason ?? 'FSM group pending stakeholder confirmation.',
+      rowIndex,
+      originalValue: statusInfo.rawOriginal,
+      proposedValue: `canonical=${statusInfo.canonical}, group=PENDING`,
     })
   }
-  if (sourceInfo.original && !sourceInfo.known) {
-    warnings.push({
-      severity: 'WARNING',
-      category: 'unknown-source',
-      field: 'leads_source',
-      message: `Source "${sourceInfo.original}" is not in the CXLite taxonomy — preserved as-is.`,
-      rowIndex,
-      originalValue: sourceInfo.original,
-      proposedValue: sourceInfo.normalized,
-    })
+  if (sourceInfo.rawOriginal && !sourceInfo.cxliteApproved) {
+    if (sourceInfo.pending) {
+      // Qonex-known value with a proposed canonical awaiting Ecovia
+      // approval. Flag as a non-overridable warning so the reviewer sees
+      // original → proposed-canonical explicitly.
+      warnings.push({
+        severity: 'WARNING',
+        category: 'pending-source-mapping',
+        field: 'leads_source',
+        message: sourceInfo.reason!,
+        rowIndex,
+        originalValue: sourceInfo.rawOriginal,
+        proposedValue: sourceInfo.canonical,
+      })
+    } else {
+      // Not in the Qonex vocabulary and not an approved CXLite enum
+      // value. Preserve the raw string in the SQL column (free-text) but
+      // flag it so the migrator can decide.
+      warnings.push({
+        severity: 'WARNING',
+        category: 'unknown-source',
+        field: 'leads_source',
+        message:
+          sourceInfo.reason ??
+          `Source "${sourceInfo.rawOriginal}" is not in the CXLite taxonomy — preserved as-is.`,
+        rowIndex,
+        originalValue: sourceInfo.rawOriginal,
+        proposedValue: sourceInfo.canonical,
+      })
+    }
   }
   if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
     warnings.push({
@@ -312,18 +351,19 @@ function transformOneSqlRow(
 
   const provenanceUser = ctx.rowProvenanceUser ?? DEFAULT_ROW_PROVENANCE_USER
 
+  const sourceForColumn = sourceInfo.canonical ?? sourceInfo.rawOriginal
   const record: SqlRecord = {
     id,
     eventlog_id: null,
     event_name: null,
     event_time: changedOnUtc,
-    leads_source: sourceInfo.normalized || sourceInfo.original || null,
+    leads_source: sourceForColumn,
     leads_parent_channel: PARENT_CHANNEL,
-    leads_channel: (sourceInfo.normalized || sourceInfo.original || '').toUpperCase() || null,
+    leads_channel: sourceForColumn ? sourceForColumn.toUpperCase() : null,
     leads_parent_id: parentWa,
     leads_id: leadsId,
-    leads_group_status: groupStatus,
-    leads_status: statusUpper,
+    leads_group_status: statusInfo.group === 'UNKNOWN' || statusInfo.group === 'PENDING' ? null : statusInfo.group,
+    leads_status: statusInfo.upper,
     leads_group_type: null,
     leads_type: null,
     leads_total_score: 0,

@@ -47,7 +47,10 @@ export type IssueCategory =
   | 'mapping-incompatible'
   | 'destination-constraint'
   | 'unknown-status'
+  | 'unresolved-status'
+  | 'pending-status-mapping'
   | 'unknown-source'
+  | 'pending-source-mapping'
   | 'missing-won-field'
   | 'partial-won'
 
