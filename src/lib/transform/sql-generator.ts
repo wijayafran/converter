@@ -11,7 +11,6 @@
 
 import type { ParsedFile } from '@/types'
 import {
-  clampVarchar,
   digitsPhone,
   isBlank,
   normalizeEmail,
@@ -39,18 +38,19 @@ import type {
   TransformedRecord,
 } from './types'
 
-const SYSTEM_USER = 'system-batch'
-const DEFAULT_QUAL = 'Medium'
+/** Row-provenance metadata (SQL `created_by` / `updated_by`) default. */
+const DEFAULT_ROW_PROVENANCE_USER = 'system-batch'
+/** URGENCY default — unchanged (no Qonex analogue, awaiting CXLite policy). */
 const DEFAULT_URGENCY = 'Medium'
 const PARENT_CHANNEL = 'ONLINE'
 /**
- * Constant creator / assigner for every row the migration produces.
- * The authoritative mapping sources leads_created_by / leads_assigned_by
- * from `data.createdBy` / `data.assignedBy`, which don't exist in Qonex;
- * stamping a fixed migration identity keeps provenance auditable without
- * silently coercing a Qonex sales rep into those columns.
+ * Constant for `leads_created_by` only. The Migration Excel confirms the
+ * migration itself as the lead-level creator since Qonex has no
+ * `data.createdBy` analogue.
  */
 const DATA_MIGRATION_USER = 'DataMigration01'
+/** Hard varchar(2000) ceiling for leads_note. */
+const LEADS_NOTE_MAX = 2000
 
 export interface SqlRecord {
   [column: string]: string | number | boolean | null
@@ -61,6 +61,13 @@ export interface SqlTransformOptions {
   waMobilePrefix?: string
   dryRun?: boolean
   now?: Date
+  /**
+   * Value written to the SQL row-provenance columns `created_by` and
+   * `updated_by`. Defaults to 'system-batch' (the SQL default per the
+   * authoritative DDL). The Migration Excel currently proposes
+   * 'DataMigration01'; the final value is awaiting Ecovia confirmation.
+   */
+  rowProvenanceUser?: string
 }
 
 export function transformToSqlRecords(
@@ -72,6 +79,7 @@ export function transformToSqlRecords(
     dryRun: options.dryRun ?? true,
     waMobilePrefix: options.waMobilePrefix ?? 'wa_',
     now: options.now ?? new Date(),
+    rowProvenanceUser: options.rowProvenanceUser ?? DEFAULT_ROW_PROVENANCE_USER,
   }
 
   const records: Array<TransformedRecord<SqlRecord>> = []
@@ -173,8 +181,8 @@ function transformOneSqlRow(
   const statusUpper = sqlStatusUpper(row['status'])
   const groupStatus = sqlGroupStatus(row['status'])
   const budget = safeNumericString(row['type_price'])
-  const notes = clampVarchar(row['keterangan'], 2000)
-  const company = trimString(row['group'])
+  const noteRaw = trimString(row['keterangan'])
+  const noteOverflow = noteRaw !== null && noteRaw.length > LEADS_NOTE_MAX
   const cluster = trimString(row['cluster'])
   const phoneDigits = digitsPhone(phoneResult)
   const parentWa = waMobileId(phoneResult, ctx.waMobilePrefix)
@@ -271,15 +279,20 @@ function transformOneSqlRow(
       proposedValue: email,
     })
   }
-  if (notes.truncated) {
-    warnings.push({
-      severity: 'WARNING',
+  if (noteOverflow) {
+    // varchar(2000) is a hard destination constraint. Silently truncating
+    // customer notes is irreversible and loses audit value, so we BLOCK
+    // the row and preserve the full original text in the issue report
+    // for review. The record field itself is set to NULL — if the row is
+    // ever forced through, the DB sees NULL rather than a mangled note.
+    blockingIssues.push({
+      severity: 'BLOCKED',
       category: 'destination-constraint',
       field: 'leads_note',
-      message: 'Notes exceeded 2000 chars (varchar(2000)); truncated.',
+      message: `Notes (${noteRaw!.length} chars) exceed varchar(${LEADS_NOTE_MAX}); irreversible truncation would occur. Shorten the source note or exclude the row.`,
       rowIndex,
-      originalValue: String(row['keterangan']).slice(0, 50) + '…',
-      proposedValue: notes.value,
+      originalValue: noteRaw,
+      proposedValue: null,
     })
   }
 
@@ -296,6 +309,8 @@ function transformOneSqlRow(
   const createdOnUtc = createDate.utcIso
   const changedOnUtc = updatedDate.utcIso
   const nowUtc = ctx.now.toISOString()
+
+  const provenanceUser = ctx.rowProvenanceUser ?? DEFAULT_ROW_PROVENANCE_USER
 
   const record: SqlRecord = {
     id,
@@ -317,17 +332,23 @@ function transformOneSqlRow(
     leads_changed_on: changedOnUtc ?? createdOnUtc,
     leads_created_by: DATA_MIGRATION_USER,
     leads_assigned_to: salesRep,
-    leads_assigned_by: DATA_MIGRATION_USER,
-    leads_company: company,
-    leads_note: notes.value,
-    leads_qualification_level: DEFAULT_QUAL,
+    // Audit 2026-10-13 round-2: NULL pending Ecovia confirmation of the
+    // migration-marker policy on leads_assigned_by. Mirrored on sales_manager_name.
+    leads_assigned_by: null,
+    // NULL pending Ecovia confirmation of company mapping.
+    leads_company: null,
+    leads_note: noteOverflow ? null : noteRaw,
+    // NULL — no Qonex field maps to CXLite qualification_level; was 'Medium'
+    // placeholder in the prior round and has now been removed per the Excel.
+    leads_qualification_level: null,
     leads_customer_budget: budget.numeric !== null ? String(budget.numeric) : budget.raw,
     leads_customer_name: name,
     leads_customer_email: email,
     leads_customer_phone: phoneDigits,
     leads_customer_address: trimString(row['lokasi_walkin']),
     leads_customer_ktp: '',
-    leads_project: trimString(row['group']) ?? company,
+    // NULL pending Ecovia confirmation of project mapping.
+    leads_project: null,
     leads_cluster: cluster,
     leads_urgency: DEFAULT_URGENCY,
     leads_property_price: 0,
@@ -340,13 +361,14 @@ function transformOneSqlRow(
     sales_email: null,
     sales_phone: null,
     sales_manager_id: null,
-    sales_manager_name: DATA_MIGRATION_USER,
+    // NULL — mirrors leads_assigned_by (both pending Ecovia confirmation).
+    sales_manager_name: null,
     sales_manager_phone: null,
     sales_manager_email: null,
     created_at: nowUtc,
-    created_by: SYSTEM_USER,
+    created_by: provenanceUser,
     updated_at: nowUtc,
-    updated_by: SYSTEM_USER,
+    updated_by: provenanceUser,
     deleted_at: null,
     deleted_by: null,
   }
@@ -356,16 +378,18 @@ function transformOneSqlRow(
     if (col.sqlType === 'varchar' && col.maxLength && !isBlank(value)) {
       const current = String(value)
       if (current.length > col.maxLength) {
-        warnings.push({
-          severity: 'WARNING',
+        // Hard destination constraint: never silently truncate. The
+        // original is preserved on the issue for review.
+        blockingIssues.push({
+          severity: 'BLOCKED',
           category: 'destination-constraint',
           field: col.name,
-          message: `Value exceeds varchar(${col.maxLength}); truncated.`,
+          message: `Value (${current.length} chars) exceeds varchar(${col.maxLength}); irreversible truncation would occur. Fix the source value or exclude the row.`,
           rowIndex,
           originalValue: current,
-          proposedValue: current.slice(0, col.maxLength),
+          proposedValue: null,
         })
-        record[col.name] = current.slice(0, col.maxLength)
+        record[col.name] = null
       }
     }
     if (!col.nullable && (value === null || value === undefined)) {

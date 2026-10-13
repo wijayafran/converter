@@ -92,15 +92,18 @@ describe('transformToSqlRecords — matches authoritative DDL', () => {
     ).toBe(true)
   })
 
-  it('truncates leads_note at 2000 chars and warns', () => {
-    const parsed = buildParsedFile([validRow({ keterangan: 'x'.repeat(5000) })])
+  it('leads_note > 2000 chars → BLOCKED, original preserved for review', () => {
+    const original = 'x'.repeat(5000)
+    const parsed = buildParsedFile([validRow({ keterangan: original })])
     const result = transformToSqlRecords(parsed)
-    expect((result.records[0].record.leads_note as string).length).toBeLessThanOrEqual(2000)
-    expect(
-      result.records[0].warnings.some(
-        (i) => i.category === 'destination-constraint' && i.field === 'leads_note',
-      ),
-    ).toBe(true)
+    const r = result.records[0]
+    expect(r.blocked).toBe(true)
+    expect(r.record.leads_note).toBeNull()
+    const noteBlocker = r.blockingIssues.find((i) => i.field === 'leads_note')
+    expect(noteBlocker).toBeDefined()
+    expect(noteBlocker!.category).toBe('destination-constraint')
+    expect(noteBlocker!.originalValue).toBe(original)
+    expect(noteBlocker!.proposedValue).toBeNull()
   })
 
   it('scales to 8000 rows under 5s', () => {
@@ -180,10 +183,10 @@ describe('transformToSqlRecords — revised migration rules (post-audit)', () =>
     expect(result.records[0].record.leads_created_by).toBe('DataMigration01')
   })
 
-  it('leads_assigned_by = "DataMigration01" (constant, not sales_rep)', () => {
+  it('leads_assigned_by is NULL (pending Ecovia confirmation)', () => {
     const parsed = buildParsedFile([validRow({ sales_rep: 'Siti R.' })])
     const result = transformToSqlRecords(parsed)
-    expect(result.records[0].record.leads_assigned_by).toBe('DataMigration01')
+    expect(result.records[0].record.leads_assigned_by).toBeNull()
   })
 
   it('leads_assigned_to remains the Qonex sales_rep', () => {
@@ -192,11 +195,11 @@ describe('transformToSqlRecords — revised migration rules (post-audit)', () =>
     expect(result.records[0].record.leads_assigned_to).toBe('Siti R.')
   })
 
-  it('sales_manager_name mirrors leads_assigned_by = "DataMigration01"', () => {
+  it('sales_manager_name is NULL (mirrors leads_assigned_by)', () => {
     const parsed = buildParsedFile([validRow()])
     const result = transformToSqlRecords(parsed)
     const r = result.records[0].record
-    expect(r.sales_manager_name).toBe('DataMigration01')
+    expect(r.sales_manager_name).toBeNull()
     expect(r.sales_manager_name).toBe(r.leads_assigned_by)
   })
 
@@ -218,7 +221,7 @@ describe('transformToSqlRecords — revised migration rules (post-audit)', () =>
     expect(result.records[0].record.eventlog_id).toBeNull()
   })
 
-  it('row-provenance columns (created_by / updated_by) stay "system-batch"', () => {
+  it('row-provenance columns (created_by / updated_by) stay "system-batch" by default', () => {
     const parsed = buildParsedFile([validRow()])
     const result = transformToSqlRecords(parsed)
     const r = result.records[0].record
@@ -228,5 +231,85 @@ describe('transformToSqlRecords — revised migration rules (post-audit)', () =>
     expect(r.created_by).toBe('system-batch')
     expect(r.updated_by).toBe('system-batch')
     expect(r.leads_created_by).toBe('DataMigration01')
+  })
+})
+
+/**
+ * Round-2 corrections (audit 2026-10-13 round-2):
+ *   leads_assigned_by      → NULL (pending Ecovia confirmation)
+ *   sales_manager_name     → NULL (mirror of leads_assigned_by)
+ *   leads_qualification_level → NULL (no Qonex analogue)
+ *   leads_company          → NULL (pending Ecovia confirmation)
+ *   leads_project          → NULL (pending Ecovia confirmation)
+ *   created_by / updated_by → configurable via rowProvenanceUser;
+ *                             default stays "system-batch"
+ *   leads_note > 2000 chars → BLOCKED, original preserved on the issue
+ */
+describe('transformToSqlRecords — round-2 pending-Ecovia NULLs + overflow BLOCK', () => {
+  it('leads_qualification_level is NULL (no Qonex analogue)', () => {
+    const parsed = buildParsedFile([validRow()])
+    const result = transformToSqlRecords(parsed)
+    expect(result.records[0].record.leads_qualification_level).toBeNull()
+  })
+
+  it('leads_company is NULL (pending Ecovia confirmation) regardless of Qonex group', () => {
+    const parsed = buildParsedFile([validRow({ group: 'Vireya' })])
+    const result = transformToSqlRecords(parsed)
+    expect(result.records[0].record.leads_company).toBeNull()
+  })
+
+  it('leads_project is NULL (pending Ecovia confirmation) regardless of Qonex group', () => {
+    const parsed = buildParsedFile([validRow({ group: 'Vireya' })])
+    const result = transformToSqlRecords(parsed)
+    expect(result.records[0].record.leads_project).toBeNull()
+  })
+
+  it('rowProvenanceUser option overrides created_by / updated_by', () => {
+    const parsed = buildParsedFile([validRow()])
+    const result = transformToSqlRecords(parsed, {
+      rowProvenanceUser: 'DataMigration01',
+    })
+    const r = result.records[0].record
+    expect(r.created_by).toBe('DataMigration01')
+    expect(r.updated_by).toBe('DataMigration01')
+    // leads_created_by stays its own constant (lead-level, not row-level).
+    expect(r.leads_created_by).toBe('DataMigration01')
+  })
+
+  it('default row-provenance stays "system-batch" when no override is passed', () => {
+    const parsed = buildParsedFile([validRow()])
+    const result = transformToSqlRecords(parsed)
+    const r = result.records[0].record
+    expect(r.created_by).toBe('system-batch')
+    expect(r.updated_by).toBe('system-batch')
+  })
+
+  it('leads_note at exactly 2000 chars is accepted (boundary)', () => {
+    const parsed = buildParsedFile([validRow({ keterangan: 'x'.repeat(2000) })])
+    const result = transformToSqlRecords(parsed)
+    const r = result.records[0]
+    expect(r.blocked).toBe(false)
+    expect(r.record.leads_note).toBe('x'.repeat(2000))
+  })
+
+  it('generic varchar overflow also BLOCKS (never silent truncation)', () => {
+    // sales_rep is written to leads_assigned_to (varchar(100)).
+    const parsed = buildParsedFile([
+      validRow({ sales_rep: 'A'.repeat(150) }),
+    ])
+    const result = transformToSqlRecords(parsed)
+    const r = result.records[0]
+    expect(r.blocked).toBe(true)
+    const overflow = r.blockingIssues.find(
+      (i) => i.field === 'leads_assigned_to' && i.category === 'destination-constraint',
+    )
+    expect(overflow).toBeDefined()
+    expect(String(overflow!.originalValue)).toHaveLength(150)
+  })
+
+  it('leads_note short input unchanged (no truncation path)', () => {
+    const parsed = buildParsedFile([validRow({ keterangan: 'brief note' })])
+    const result = transformToSqlRecords(parsed)
+    expect(result.records[0].record.leads_note).toBe('brief note')
   })
 })

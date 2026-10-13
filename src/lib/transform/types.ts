@@ -43,4 +43,12 @@ export interface TransformContext {
   dryRun: boolean
   waMobilePrefix: string
   now: Date
+  /**
+   * Metadata value written to the SQL row-provenance column (`created_by`
+   * and `updated_by`). Independent of `leads_created_by`, which is a
+   * lead-level field. Default 'system-batch'; the Migration Excel
+   * proposes 'DataMigration01' but the final value is awaiting
+   * confirmation from Ecovia.
+   */
+  rowProvenanceUser?: string
 }
