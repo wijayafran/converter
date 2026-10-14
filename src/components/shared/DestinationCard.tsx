@@ -18,6 +18,7 @@ interface Props {
   stackLine: string
   onStart: () => void
   disabled?: boolean
+  badge?: string
 }
 
 export function DestinationCard({
@@ -28,6 +29,7 @@ export function DestinationCard({
   stackLine,
   onStart,
   disabled,
+  badge,
 }: Props) {
   return (
     <Card className="flex h-full flex-col transition-shadow hover:shadow-md">
@@ -36,7 +38,7 @@ export function DestinationCard({
           <div className="rounded-md border border-border bg-muted/40 p-2.5">
             <Icon className="h-5 w-5" />
           </div>
-          <Badge variant="muted">Phase 1 • UI only</Badge>
+          <Badge variant="muted">{badge ?? 'Local Development'}</Badge>
         </div>
         <CardTitle className="mt-4">{title}</CardTitle>
         <p className="text-sm font-medium text-foreground/80">{tagline}</p>

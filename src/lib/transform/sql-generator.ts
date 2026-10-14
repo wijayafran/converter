@@ -39,8 +39,6 @@ import type {
 
 /** Row-provenance metadata (SQL `created_by` / `updated_by`) default. */
 const DEFAULT_ROW_PROVENANCE_USER = 'system-batch'
-/** URGENCY default — unchanged (no Qonex analogue, awaiting CXLite policy). */
-const DEFAULT_URGENCY = 'Medium'
 const PARENT_CHANNEL = 'ONLINE'
 /**
  * Constant for `leads_created_by` only. The Migration Excel confirms the
@@ -278,9 +276,10 @@ function transformOneSqlRow(
   }
   if (sourceInfo.rawOriginal && !sourceInfo.cxliteApproved) {
     if (sourceInfo.pending) {
-      // Qonex-known value with a proposed canonical awaiting Ecovia
-      // approval. Flag as a non-overridable warning so the reviewer sees
-      // original → proposed-canonical explicitly.
+      // Qonex-known value with a PROPOSAL awaiting Ecovia approval.
+      // Phase 2C: proposal is metadata only — leads_source stays raw.
+      // The warning is structural so bulk-approve cannot silently
+      // promote the proposal into production output.
       warnings.push({
         severity: 'WARNING',
         category: 'pending-source-mapping',
@@ -288,7 +287,7 @@ function transformOneSqlRow(
         message: sourceInfo.reason!,
         rowIndex,
         originalValue: sourceInfo.rawOriginal,
-        proposedValue: sourceInfo.canonical,
+        proposedValue: sourceInfo.proposedCanonical,
       })
     } else {
       // Not in the Qonex vocabulary and not an approved CXLite enum
@@ -303,7 +302,7 @@ function transformOneSqlRow(
           `Source "${sourceInfo.rawOriginal}" is not in the CXLite taxonomy — preserved as-is.`,
         rowIndex,
         originalValue: sourceInfo.rawOriginal,
-        proposedValue: sourceInfo.canonical,
+        proposedValue: null,
       })
     }
   }
@@ -390,7 +389,9 @@ function transformOneSqlRow(
     // NULL pending Ecovia confirmation of project mapping.
     leads_project: null,
     leads_cluster: cluster,
-    leads_urgency: DEFAULT_URGENCY,
+    // NULL per revised Excel — "Medium" was an invented default; no Qonex
+    // field maps to CXLite urgency.
+    leads_urgency: null,
     leads_property_price: 0,
     leads_raw_property: '{}',
     leads_financing: null,

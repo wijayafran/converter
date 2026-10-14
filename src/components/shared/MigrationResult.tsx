@@ -11,6 +11,12 @@ interface Props {
 }
 
 export function MigrationResult({ result, onStartOver }: Props) {
+  // Mode-aware wording. In LIVE (SQL Local Test) the result reflects real
+  // inserts into the local SQL container; in DRY_RUN / MOCK everything
+  // is simulated and the "successful" column is intentionally zero (see
+  // the workflow store's toResultSummary).
+  const isLive = result.simulated === false
+
   const cards: Array<{
     label: string
     value: string
@@ -18,6 +24,7 @@ export function MigrationResult({ result, onStartOver }: Props) {
   }> = [
     { label: 'Job ID', value: result.jobId },
     { label: 'Destination', value: result.destinationLabel },
+    { label: 'Mode', value: isLive ? 'SQL Local Test' : 'Dry Run' },
     {
       label: 'Started',
       value: new Date(result.startedAt).toLocaleString('id-ID'),
@@ -35,7 +42,7 @@ export function MigrationResult({ result, onStartOver }: Props) {
       tone: 'text-foreground',
     },
     {
-      label: 'Successful (simulated)',
+      label: isLive ? 'Inserted (read-back verified)' : 'Successful (dry run)',
       value: result.successful,
       tone: 'text-[hsl(var(--success))]',
     },
@@ -58,11 +65,16 @@ export function MigrationResult({ result, onStartOver }: Props) {
 
   return (
     <div className="flex flex-col gap-6">
-      <Alert variant="warning">
-        <AlertTitle>Simulated result</AlertTitle>
+      <Alert variant={isLive ? 'info' : 'warning'}>
+        <AlertTitle>
+          {isLive
+            ? 'SQL Local Test — local database result'
+            : 'Dry Run — no database writes'}
+        </AlertTitle>
         <AlertDescription>
-          Phase 1 tidak melakukan penulisan ke sistem tujuan. Semua angka di
-          bawah ini merupakan hasil simulasi berdasarkan keputusan user.
+          {isLive
+            ? 'Rows below were inserted into dev_analytic_cxlite.analytic_leads_sales on the local lemons-mssql container and verified via read-back. Tabel eventlog tidak disentuh. Tidak ada koneksi ke produksi.'
+            : 'Mode Dry Run menggunakan MOCK adapter. Tidak ada tulisan ke database apa pun; semua angka adalah hitungan simulasi untuk preview.'}
         </AlertDescription>
       </Alert>
 
@@ -74,7 +86,9 @@ export function MigrationResult({ result, onStartOver }: Props) {
               Simpan laporan ini untuk audit internal.
             </p>
           </div>
-          <Badge variant="muted">SIMULATED</Badge>
+          <Badge variant="muted">
+            {isLive ? 'SQL Local Test' : 'Dry Run'}
+          </Badge>
         </div>
         <dl className="grid gap-x-6 gap-y-3 px-5 py-4 sm:grid-cols-2 lg:grid-cols-4">
           {cards.map((c) => (

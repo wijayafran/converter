@@ -28,7 +28,7 @@ export function AppShell({ children }: Props) {
                 LEMONS Data Migrations Ecovia
               </div>
               <div className="text-[11px] text-muted-foreground">
-                Internal · Phase 1 prototype
+                Internal · Local Development
               </div>
             </div>
           </Link>
@@ -42,7 +42,7 @@ export function AppShell({ children }: Props) {
                 Kembali ke beranda
               </Link>
             )}
-            <Badge variant="muted">UI-only mode</Badge>
+            <Badge variant="muted">Local Development</Badge>
           </div>
         </div>
       </header>
@@ -52,9 +52,9 @@ export function AppShell({ children }: Props) {
       <footer className="border-t border-border py-6">
         <div className="container flex flex-col items-start justify-between gap-2 text-xs text-muted-foreground sm:flex-row sm:items-center">
           <span>
-            © Qonex Internal — build untuk validasi UI/UX, bukan untuk produksi.
+            © Qonex Internal — local SQL Server POC. Not connected to production.
           </span>
-          <span>Phase 1 · v0.1.0</span>
+          <span>Local Development · v0.1.0</span>
         </div>
       </footer>
     </div>

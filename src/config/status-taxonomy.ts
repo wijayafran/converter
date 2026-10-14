@@ -332,12 +332,28 @@ const SOURCE_PENDING_LOOKUP: Record<
 
 export interface QonexSourceResolution {
   rawOriginal: string | null
+  /**
+   * Value to WRITE to `leads_source`. Phase 2C invariant:
+   *   - cxliteApproved: canonical approved CXLite value
+   *   - pending      : the raw Qonex string, unchanged (NOT the proposal)
+   *   - unknown      : the raw Qonex string, unchanged
+   *
+   * Proposed-but-unapproved canonicals never leak into the SQL column —
+   * they are surfaced on `proposedCanonical` for the issue report only.
+   */
   canonical: string | null
+  /**
+   * Metadata only. Non-null when a proposal exists but has not been
+   * approved by Ecovia. The engine renders this on the issue's
+   * `proposedValue` so the reviewer sees the suggestion without the
+   * suggestion ever reaching the SQL output.
+   */
+  proposedCanonical: string | null
   /** Qonex-side vocabulary status: true if we have ever seen this raw value. */
   qonexKnown: boolean
-  /** True when `canonical` is in the approved CXLite enum (per buat-ricad §4.2). */
+  /** True when the canonical is in the approved CXLite enum (per buat-ricad §4.2). */
   cxliteApproved: boolean
-  /** True when canonical is a proposal awaiting Ecovia approval. */
+  /** True when `proposedCanonical` is a proposal awaiting Ecovia approval. */
   pending: boolean
   reason?: string
 }
@@ -347,6 +363,7 @@ export function resolveQonexSource(raw: unknown): QonexSourceResolution {
     return {
       rawOriginal: null,
       canonical: null,
+      proposedCanonical: null,
       qonexKnown: false,
       cxliteApproved: false,
       pending: false,
@@ -357,6 +374,7 @@ export function resolveQonexSource(raw: unknown): QonexSourceResolution {
     return {
       rawOriginal: null,
       canonical: null,
+      proposedCanonical: null,
       qonexKnown: false,
       cxliteApproved: false,
       pending: false,
@@ -368,6 +386,7 @@ export function resolveQonexSource(raw: unknown): QonexSourceResolution {
     return {
       rawOriginal: trimmed,
       canonical: approved,
+      proposedCanonical: null,
       qonexKnown: true,
       cxliteApproved: CXLITE_APPROVED_SOURCES.has(approved),
       pending: false,
@@ -375,20 +394,24 @@ export function resolveQonexSource(raw: unknown): QonexSourceResolution {
   }
   const pending = SOURCE_PENDING_LOOKUP[key]
   if (pending) {
+    // Phase 2C: preserve the raw string in the output; the proposal is
+    // reported but NEVER silently written to leads_source.
     return {
       rawOriginal: trimmed,
-      canonical: pending.proposedCanonical,
+      canonical: trimmed,
+      proposedCanonical: pending.proposedCanonical,
       qonexKnown: true,
       cxliteApproved: false,
       pending: true,
       reason: pending.reason,
     }
   }
-  // Preserve the raw value for the SQL column so analytics can still see
-  // the free-text source, but neither Qonex nor CXLite recognise it.
+  // Not in the Qonex vocabulary and not in the CXLite enum: preserve the
+  // free-text verbatim so analytics still sees what the operator saw.
   return {
     rawOriginal: trimmed,
     canonical: trimmed,
+    proposedCanonical: null,
     qonexKnown: false,
     cxliteApproved: CXLITE_APPROVED_SOURCES.has(trimmed),
     pending: false,

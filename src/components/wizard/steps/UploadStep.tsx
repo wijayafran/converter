@@ -23,9 +23,9 @@ export function UploadStep({
       <Alert variant="info">
         <AlertTitle>Privacy by default</AlertTitle>
         <AlertDescription>
-          File Excel diproses sepenuhnya di browser Anda. Tidak ada data pelanggan
-          yang diunggah ke server pada Phase 1 — ini berlaku untuk migrasi
-          {' '}
+          File Excel diproses sepenuhnya di browser Anda. Payload hasil
+          transformasi hanya dikirim ke backend lokal saat Anda memilih SQL
+          Local Test — tidak ada koneksi ke sistem produksi untuk migrasi{' '}
           <strong>{destinationLabel}</strong>.
         </AlertDescription>
       </Alert>

@@ -167,7 +167,7 @@ describe('SQL generator — UAT statuses produce correct columns', () => {
   })
 })
 
-describe('resolveQonexSource — UAT values', () => {
+describe('resolveQonexSource — UAT values (Phase 2C: never auto-apply proposals)', () => {
   const pending: Array<[string, string]> = [
     ['Rumah123', 'Partnership'],
     ['SML Website', 'Official Website'],
@@ -175,20 +175,24 @@ describe('resolveQonexSource — UAT values', () => {
     ['Website Ecovia', 'Official Website'],
   ]
   it.each(pending)(
-    'Qonex-known "%s" → proposed canonical "%s", pending Ecovia approval',
+    'Qonex-known "%s" preserves raw in canonical; proposed "%s" is metadata only',
     (raw, proposed) => {
       const r = resolveQonexSource(raw)
       expect(r.rawOriginal).toBe(raw)
       expect(r.qonexKnown).toBe(true)
       expect(r.cxliteApproved).toBe(false)
       expect(r.pending).toBe(true)
-      expect(r.canonical).toBe(proposed)
+      // Phase 2C contract: canonical is the raw string, NEVER the proposal.
+      expect(r.canonical).toBe(raw)
+      expect(r.canonical).not.toBe(proposed)
+      expect(r.proposedCanonical).toBe(proposed)
     },
   )
 
   it('"Referrals" (plural) normalises to approved canonical "Referral"', () => {
     const r = resolveQonexSource('Referrals')
     expect(r.canonical).toBe('Referral')
+    expect(r.proposedCanonical).toBeNull()
     expect(r.qonexKnown).toBe(true)
     expect(r.cxliteApproved).toBe(true)
     expect(r.pending).toBe(false)
@@ -200,26 +204,45 @@ describe('resolveQonexSource — UAT values', () => {
     expect(r.cxliteApproved).toBe(false)
     expect(r.pending).toBe(false)
     expect(r.canonical).toBe('BrandNewChannel')
+    expect(r.proposedCanonical).toBeNull()
     expect(r.reason).toContain('Unknown')
   })
 })
 
-describe('SQL generator — UAT sources produce the right issues', () => {
-  it('pending source emits WARNING with original + proposed, non-overridable', () => {
+describe('SQL generator — UAT sources produce the right issues (Phase 2C)', () => {
+  it('pending source: leads_source stays raw; proposal is metadata on the issue', () => {
     const parsed = buildParsedFile([validRow({ source_data: 'Rumah123' })])
     const result = transformToSqlRecords(parsed)
     const r = result.records[0]
-    expect(r.record.leads_source).toBe('Partnership')
-    expect(r.record.leads_channel).toBe('PARTNERSHIP')
+    // SQL output preserves the Qonex raw value verbatim.
+    expect(r.record.leads_source).toBe('Rumah123')
+    expect(r.record.leads_channel).toBe('RUMAH123')
     const warn = r.warnings.find((i) => i.category === 'pending-source-mapping')
     expect(warn).toBeDefined()
     expect(warn?.originalValue).toBe('Rumah123')
     expect(warn?.proposedValue).toBe('Partnership')
-    // Validation engine side: not overridable.
+    // Validation engine side: not overridable (bulk approve cannot silently
+    // promote the proposal to production output).
     const vResult = runValidation({ destination: 'sql', parsed })
     const vIssue = vResult.issues.find((i) => i.category === 'pending-source-mapping')
     expect(vIssue).toBeDefined()
     expect(canOverride(vIssue!)).toBe(false)
+  })
+
+  it('every pending UAT source preserves the raw in both leads_source and leads_channel', () => {
+    const inputs: Array<[string, string]> = [
+      ['Rumah123', 'RUMAH123'],
+      ['SML Website', 'SML WEBSITE'],
+      ['Official - FB IG Ads Form', 'OFFICIAL - FB IG ADS FORM'],
+      ['Website Ecovia', 'WEBSITE ECOVIA'],
+    ]
+    for (const [raw, upper] of inputs) {
+      const parsed = buildParsedFile([validRow({ source_data: raw })])
+      const result = transformToSqlRecords(parsed)
+      const r = result.records[0]
+      expect(r.record.leads_source).toBe(raw)
+      expect(r.record.leads_channel).toBe(upper)
+    }
   })
 
   it('approved source "Referral" (and plural variant) emits no source warning', () => {

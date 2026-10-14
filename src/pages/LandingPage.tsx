@@ -33,6 +33,7 @@ export function LandingPage() {
           tagline="Qonex Excel → Lemon JSON"
           description="Convert Qonex Excel data into Lemon-compatible JSON and prepare it for API submission."
           stackLine="Target: Lemon / CXLite API · Storage: Azure Cosmos DB"
+          badge="Cosmos DEV Pending"
           onStart={() => start('lemon')}
         />
         <DestinationCard
@@ -40,17 +41,19 @@ export function LandingPage() {
           title="SQL Server Migration"
           tagline="Qonex Excel → SQL Server rows"
           description="Validate and prepare Qonex customer data for insertion into SQL Server."
-          stackLine="Target: Microsoft SQL Server · Table: dbo.leads"
+          stackLine="Target: Microsoft SQL Server · Table: dev_analytic_cxlite.analytic_leads_sales"
+          badge="SQL Local Test"
           onStart={() => start('sql')}
         />
       </section>
 
       <section className="rounded-lg border border-dashed border-border bg-muted/20 p-5 text-sm text-muted-foreground">
         <p>
-          <span className="font-medium text-foreground">Phase 1 scope.</span>{' '}
-          Antarmuka ini adalah prototipe end-to-end untuk validasi oleh pengguna.
-          Parsing Excel dilakukan di browser; penulisan ke Lemon API atau SQL
-          Server <em>tidak</em> dilakukan hingga Phase 2.
+          <span className="font-medium text-foreground">Local Development.</span>{' '}
+          Parsing Excel berjalan di browser. SQL Local Test menulis ke SQL
+          Server lokal (<code className="font-mono text-xs">lemons-mssql</code>);
+          Cosmos DEV masih menunggu kredensial dan kontrak Lemon Vireya. Tidak
+          ada koneksi ke produksi.
         </p>
       </section>
     </div>

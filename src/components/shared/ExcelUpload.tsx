@@ -68,7 +68,8 @@ export function ExcelUpload({ onParsed }: Props) {
           </p>
           <p className="text-xs text-muted-foreground">
             Format yang didukung: .xlsx, .xls, .csv — dibaca di browser,
-            tidak diunggah ke server pada Phase 1.
+            hanya hasil transformasi yang dikirim ke backend lokal saat SQL
+            Local Test diaktifkan.
           </p>
         </div>
         <input

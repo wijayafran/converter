@@ -16,7 +16,8 @@
     "poc:sql": "MIGRATION_LIVE=true TSX_TSCONFIG_PATH=tsconfig.server.json tsx scripts/poc-sql.ts",
     "poc:cosmos": "MIGRATION_LIVE=true TSX_TSCONFIG_PATH=tsconfig.server.json tsx scripts/poc-cosmos.ts",
     "verify:sql": "MIGRATION_LIVE=true TSX_TSCONFIG_PATH=tsconfig.server.json tsx scripts/verify-sql.ts",
-    "smoke:http-sql": "TSX_TSCONFIG_PATH=tsconfig.server.json tsx scripts/smoke-http-sql.ts"
+    "smoke:http-sql": "TSX_TSCONFIG_PATH=tsconfig.server.json tsx scripts/smoke-http-sql.ts",
+    "reconcile:dry-run": "TSX_TSCONFIG_PATH=tsconfig.server.json tsx scripts/reconcile-dry-run.ts"
   },
   "dependencies": {
     "@azure/cosmos": "^4.10.1",
