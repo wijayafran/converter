@@ -17,17 +17,24 @@ import {
   buildCosmosBatchArray,
   buildSqlPreviewStatement,
   transformToCosmos,
-  transformToSqlRecords,
 } from '@/lib/transform'
 import { downloadJson } from '@/lib/download'
 import type { Destination, ParsedFile, ValidationIssue } from '@/types'
 import type { AdapterConnectionProbe } from '@/lib/adapters/types'
+import type { ValidationEngineOutput } from '@/lib/validation'
 import { COSMOS_DEV_STATUS, type ExecutionMode } from '@/state/workflow-store'
 
 interface Props {
   destination: Destination
   parsedFile: ParsedFile
   issues: ValidationIssue[]
+  /**
+   * Shared prepared payload from the validation step. Preview, JSON
+   * download, and the batch run all read the exact same record objects
+   * from here, so timestamps (`created_at`, `updated_at`) are stable
+   * within a prepared run.
+   */
+  validation: ValidationEngineOutput | null
   executionMode: ExecutionMode
   backendProbe: AdapterConnectionProbe | null
   backendProbeError: string | null
@@ -40,6 +47,7 @@ export function PreviewStep({
   destination,
   parsedFile,
   issues,
+  validation,
   executionMode,
   backendProbe,
   backendProbeError,
@@ -60,14 +68,20 @@ export function PreviewStep({
 
   const sqlOutput = useMemo(() => {
     if (destination !== 'sql') return null
-    const result = transformToSqlRecords(parsedFile, { dryRun: true })
+    // Phase 2D: use the records produced by the validation step. Do NOT
+    // re-call transformToSqlRecords here — doing so creates a new
+    // `created_at`/`updated_at` timestamp set and the Preview JSON would
+    // drift from the batch payload (seen in Phase 2C UAT).
+    const wrappers = validation?.sqlResult?.records ?? []
     return {
-      records: result.records
+      records: wrappers
         .filter((r) => !r.blocked && !excludedRows.has(r.rowIndex))
         .map((r) => r.record),
-      summary: result.summary,
+      summary: validation?.sqlResult?.summary,
+      transformedAt: validation?.sqlResult?.transformedAt,
+      runId: validation?.sqlResult?.runId,
     }
-  }, [destination, parsedFile, excludedRows])
+  }, [destination, validation, excludedRows])
 
   const cosmosOutput = useMemo(() => {
     if (destination !== 'lemon') return null
@@ -207,14 +221,16 @@ export function PreviewStep({
         <AlertTitle>
           {isLive
             ? 'SQL Local Test — writes to lemons-mssql'
-            : 'DRY RUN — no writes'}
+            : destination === 'lemon'
+              ? 'Cosmos DEV — Pending Integration'
+              : 'Dry Run — No Database Writes'}
         </AlertTitle>
         <AlertDescription>
           {isLive
-            ? 'Backend akan INSERT ke dev_analytic_cxlite.analytic_leads_sales, dilanjutkan read-back verification. Tabel eventlog tidak disentuh.'
+            ? 'Backend akan INSERT ke dev_analytic_cxlite.analytic_leads_sales, dilanjutkan read-back verification. Tabel eventlog tidak disentuh. Tidak ada koneksi ke produksi.'
             : destination === 'lemon'
-              ? 'Cosmos lokal dinonaktifkan di Phase 2B. Semua angka adalah output MOCK; tidak ada tulisan ke database apa pun.'
-              : 'Mode DRY RUN pakai MOCK adapter. Tidak ada tulisan ke lemons-mssql. Pilih SQL Local Test untuk mengeksekusi.'}
+              ? 'Cosmos local emulator stays deferred until Azure DEV credentials and the Lemon Vireya API contract land. All counts here are output-only; nothing is written to any database.'
+              : 'Dry Run uses the MOCK adapter. Tidak ada tulisan ke lemons-mssql. Pilih SQL Local Test untuk mengeksekusi.'}
         </AlertDescription>
       </Alert>
 
@@ -310,11 +326,28 @@ export function PreviewStep({
             statement={sqlStatement}
             tableName={SQL_TARGET_TABLE}
           />
+          <div className="rounded-md border border-dashed border-border bg-muted/20 p-3 text-xs text-muted-foreground">
+            <p>
+              <span className="font-medium text-foreground">Eligible for migration:</span>{' '}
+              {sqlOutput.records.length.toLocaleString('id-ID')} record(s). This
+              is the exact set that will be downloaded as JSON and sent to the
+              batch runner — pagination above affects display only.
+            </p>
+            {sqlOutput.transformedAt && (
+              <p className="mt-1 font-mono text-[11px]">
+                Prepared at {new Date(sqlOutput.transformedAt).toISOString()} ·
+                run {sqlOutput.runId}
+              </p>
+            )}
+          </div>
           <div className="flex flex-wrap gap-3">
             <Button
               variant="outline"
               onClick={() =>
-                downloadJson(sqlOutput.records, 'sql-leads-dry-run.json')
+                downloadJson(
+                  sqlOutput.records,
+                  `sql-leads-${sqlOutput.runId ?? 'dry-run'}.json`,
+                )
               }
             >
               <Download className="h-4 w-4" />

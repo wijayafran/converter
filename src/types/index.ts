@@ -78,15 +78,58 @@ export interface ParsedFile {
   rows: Array<Record<string, unknown>>
 }
 
+export type MigrationMode = 'DRY_RUN' | 'SQL_LOCAL_TEST' | 'LIVE'
+
+export interface MigrationResultCounts {
+  /** Rows in the uploaded Excel. */
+  source: number
+  /** Rows excluded by user decision in Review. */
+  excluded: number
+  /** Rows blocked by validation (unresolved status, duplicates, etc). */
+  blocked: number
+  /** Rows eligible for the batch (source − excluded − blocked). */
+  eligible: number
+  /** Rows actually sent to the adapter. */
+  attempted: number
+  /** Rows the adapter reports as inserted. */
+  inserted: number
+  /** Rows the adapter refused (DRY_RUN=true). */
+  skipped: number
+  /** Rows that failed (SQL error, network, etc). */
+  failed: number
+  /** Rows the adapter treated as idempotent conflicts (PK already present). */
+  conflicts: number
+  /**
+   * Rows the adapter confirmed via a read-back SELECT. The confirmed
+   * success metric for LIVE. Null when read-back wasn't attempted (DRY RUN).
+   */
+  verified: number | null
+}
+
 export interface MigrationResultSummary {
   jobId: string
   destination: Destination
   destinationLabel: string
+  mode: MigrationMode
+  modeLabel: string
+  /** Alias of counts.source, kept for backwards compat with older UI. */
   totalRecords: number
+  /** Alias of counts.verified ?? counts.inserted (LIVE) or 0 (DRY RUN). */
   successful: number
   failed: number
   skipped: number
   pending: number
+  counts: MigrationResultCounts
+  batches: Array<{
+    batchId: string
+    attempted: number
+    inserted: number
+    skipped: number
+    failed: number
+    conflicts: number
+    insertedIds: string[]
+    failures: Array<{ recordHash: string; rowIndex: number; reason: string }>
+  }>
   startedAt: string
   finishedAt: string
   simulated: boolean

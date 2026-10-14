@@ -40,6 +40,7 @@ export function WorkflowPage() {
     mappings,
     issues,
     result,
+    validation,
     batchProgress,
     batchManifest,
     executionMode,
@@ -168,6 +169,7 @@ export function WorkflowPage() {
           destination={destination}
           parsedFile={parsedFile}
           issues={issues}
+          validation={validation}
           executionMode={executionMode}
           backendProbe={backendProbe}
           backendProbeError={backendProbeError}

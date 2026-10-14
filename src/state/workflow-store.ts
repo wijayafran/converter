@@ -2,6 +2,8 @@ import { create } from 'zustand'
 import type {
   Destination,
   FieldMapping,
+  MigrationMode,
+  MigrationResultCounts,
   MigrationResultSummary,
   ParsedFile,
   ValidationIssue,
@@ -42,7 +44,7 @@ export const BACKEND_BASE_URL =
   (import.meta.env.VITE_MIGRATION_SERVER_URL as string | undefined) ?? ''
 
 export const COSMOS_DEV_STATUS =
-  'Cosmos DEV integration pending — awaiting Azure DEV credentials + Lemon Vireya API contract. Local emulator POC is deferred.'
+  'Cosmos DEV — Pending Integration. Awaiting Azure DEV credentials + Lemon Vireya API contract. Local emulator POC is deferred.'
 
 interface WorkflowState {
   destination: Destination | null
@@ -51,6 +53,11 @@ interface WorkflowState {
   mappings: FieldMapping[]
   issues: ValidationIssue[]
   result: MigrationResultSummary | null
+  /**
+   * Shared prepared payload: Preview, JSON download, and SQL Local Test
+   * batch all read from `validation.sqlResult.records` so timestamps
+   * (`created_at`, `updated_at`) are stable within a single prepared run.
+   */
   validation: ValidationEngineOutput | null
   batchProgress: RunProgress | null
   batchManifest: RunManifest<unknown> | null
@@ -108,24 +115,44 @@ export const useWorkflowStore = create<WorkflowState & WorkflowActions>(
 
     setStep: (step) => set({ currentStep: step }),
 
-    setParsedFile: (file) => set({ parsedFile: file }),
+    setParsedFile: (file) =>
+      // Invalidate the prepared payload: a new source file means every
+      // transformed record (including timestamps) must regenerate.
+      set({
+        parsedFile: file,
+        validation: null,
+        issues: [],
+        result: null,
+        batchProgress: null,
+        batchManifest: null,
+      }),
 
     updateMapping: (destinationField, sourceField) =>
+      // Mapping change invalidates the prepared payload — Review and
+      // Preview must re-derive from a fresh validation run.
       set((state) => ({
         mappings: state.mappings.map((m) =>
           m.destinationField === destinationField
             ? { ...m, sourceField }
             : m,
         ),
+        validation: null,
+        issues: [],
+        result: null,
       })),
 
     runValidation: () => {
       const { destination, parsedFile } = get()
       if (!destination || !parsedFile) return
+      // Validation produces the canonical, timestamped record set shared by
+      // Preview / Download / Batch within this prepared run.
       const output = runValidation({ destination, parsed: parsedFile })
       set({
         issues: output.issues,
         validation: output,
+        result: null,
+        batchProgress: null,
+        batchManifest: null,
       })
     },
 
@@ -163,7 +190,7 @@ export const useWorkflowStore = create<WorkflowState & WorkflowActions>(
       const { destination, parsedFile, issues, validation, executionMode } = get()
       if (!destination || !parsedFile || !validation) return
 
-      const excludedRows = new Set(
+      const excludedRowSet = new Set(
         issues.filter((i) => i.decision === 'exclude').map((i) => i.rowIndex),
       )
 
@@ -171,10 +198,16 @@ export const useWorkflowStore = create<WorkflowState & WorkflowActions>(
       const started = new Date()
 
       if (destination === 'sql') {
-        const records: SqlRecord[] =
-          validation.sqlResult?.records
-            .filter((r) => !r.blocked && !excludedRows.has(r.rowIndex))
-            .map((r) => r.record) ?? []
+        // All three consumers (Preview, download, batch) share these exact
+        // record objects. Timestamps were set by the validation run and are
+        // not regenerated here.
+        const sqlRecordWrappers = validation.sqlResult?.records ?? []
+        const sourceTotal = parsedFile.rowCount
+        const blockedByValidation = sqlRecordWrappers.filter((r) => r.blocked).length
+        const excluded = excludedRowSet.size
+        const eligible = sqlRecordWrappers
+          .filter((r) => !r.blocked && !excludedRowSet.has(r.rowIndex))
+          .map((r) => r.record)
 
         const useLive = executionMode === 'SQL_LOCAL_TEST'
         const adapter: DestinationAdapter<SqlRecord> = useLive
@@ -183,7 +216,7 @@ export const useWorkflowStore = create<WorkflowState & WorkflowActions>(
         const handle = createBatchRunner<SqlRecord>({
           destination: 'sql',
           adapter,
-          records,
+          records: eligible,
           batchSize: 500,
           runId,
           reconcileAfterEachBatch: useLive,
@@ -198,25 +231,29 @@ export const useWorkflowStore = create<WorkflowState & WorkflowActions>(
             runId,
             started,
             finished: new Date(),
-            total: records.length,
+            source: sourceTotal,
+            blocked: blockedByValidation,
+            excluded,
+            eligible: eligible.length,
             manifest,
-            excluded: excludedRows.size,
             mode: adapter.mode,
             readback,
           }),
         })
       } else {
-        // Cosmos: local execution is intentionally disabled in Phase 2B.
-        // Everything is forced through the MOCK adapter and the result is
-        // labelled "Cosmos DEV integration pending". No real insert count is
-        // reported.
+        // Cosmos: local execution is intentionally disabled. Everything is
+        // forced through the MOCK adapter; no success count is reported.
         const leads = (validation.cosmosResult?.leads ?? [])
-          .filter((r) => !r.blocked && !excludedRows.has(r.rowIndex))
+          .filter((r) => !r.blocked && !excludedRowSet.has(r.rowIndex))
           .map((r) => r.record as CosmosLeadDocument)
         const won = (validation.cosmosResult?.wonSnapshots ?? [])
-          .filter((r) => !r.blocked && !excludedRows.has(r.rowIndex))
+          .filter((r) => !r.blocked && !excludedRowSet.has(r.rowIndex))
           .map((r) => r.record as CosmosWonDocument)
         const records: CosmosWritable[] = [...leads, ...won]
+        const sourceTotal = parsedFile.rowCount
+        const blockedByValidation =
+          (validation.cosmosResult?.leads.filter((r) => r.blocked).length ?? 0) +
+          (validation.cosmosResult?.wonSnapshots.filter((r) => r.blocked).length ?? 0)
         const adapter = createMockCosmosAdapter({ dryRun: true })
         const handle = createBatchRunner<CosmosWritable>({
           destination: 'cosmos',
@@ -235,9 +272,11 @@ export const useWorkflowStore = create<WorkflowState & WorkflowActions>(
             runId,
             started,
             finished: new Date(),
-            total: records.length,
+            source: sourceTotal,
+            blocked: blockedByValidation,
+            excluded: excludedRowSet.size,
+            eligible: records.length,
             manifest,
-            excluded: excludedRows.size,
             mode: adapter.mode,
             extraNotes: [
               COSMOS_DEV_STATUS,
@@ -283,49 +322,105 @@ interface ResultArgs {
   runId: string
   started: Date
   finished: Date
-  total: number
-  manifest: RunManifest<unknown>
+  source: number
+  blocked: number
   excluded: number
+  eligible: number
+  manifest: RunManifest<unknown>
   mode: 'MOCK' | 'DRY_RUN' | 'LIVE'
   extraNotes?: string[]
   readback?: { verified: number; missing: string[] } | null
 }
 
+function modeFor(
+  destination: Destination,
+  adapterMode: 'MOCK' | 'DRY_RUN' | 'LIVE',
+): { mode: MigrationMode; label: string } {
+  if (adapterMode === 'LIVE') {
+    return { mode: 'SQL_LOCAL_TEST', label: 'SQL Local Test' }
+  }
+  if (destination === 'lemon') {
+    return { mode: 'DRY_RUN', label: 'Cosmos DEV — Pending Integration' }
+  }
+  return { mode: 'DRY_RUN', label: 'Dry Run — No Database Writes' }
+}
+
 function toResultSummary(args: ResultArgs): MigrationResultSummary {
-  const { destination, runId, started, finished, manifest, excluded, mode, readback } = args
+  const { destination, runId, started, finished, manifest, mode, readback } = args
   const inserted = manifest.batches.reduce((n, b) => n + b.recordsInserted, 0)
   const skipped = manifest.batches.reduce((n, b) => n + b.recordsSkipped, 0)
   const failed = manifest.batches.reduce((n, b) => n + b.recordsFailed, 0)
   const conflicts = manifest.batches.reduce((n, b) => n + b.recordsConflict, 0)
-  const verifiedCount = readback?.verified ?? null
+  const attempted = manifest.batches.reduce((n, b) => n + b.recordsAttempted, 0)
+  const verified = readback?.verified ?? null
+  // Confirmed success metric: verified read-back in LIVE, nothing in DRY RUN.
+  // We NEVER hard-code success — the batch's own counts drive this.
   const successfulReported =
-    mode === 'LIVE' && readback
-      ? verifiedCount ?? 0
-      : mode === 'LIVE'
-        ? inserted
-        : 0 // MOCK/DRY_RUN never report inserts as real success
-  const notes: string[] = [
-    `Mode: ${mode}${mode === 'LIVE' ? ' (local SQL Server POC)' : ' (simulated, no production data touched)'}.`,
-    `Batches executed: ${manifest.batches.length}; retry queue: ${manifest.retryQueue.length}.`,
-    `Idempotency hashes recorded: ${manifest.idempotencyHashes.length}.`,
-    `Rows excluded by user decision: ${excluded}.`,
-    `Conflicts (idempotent skip): ${conflicts}.`,
-  ]
+    mode === 'LIVE'
+      ? verified !== null
+        ? verified
+        : inserted
+      : 0
+
+  const counts: MigrationResultCounts = {
+    source: args.source,
+    excluded: args.excluded,
+    blocked: args.blocked,
+    eligible: args.eligible,
+    attempted,
+    inserted,
+    skipped,
+    failed,
+    conflicts,
+    verified,
+  }
+
+  const { mode: resultMode, label: modeLabel } = modeFor(destination, mode)
+
+  const batches = manifest.batches.map((b) => ({
+    batchId: b.batchId,
+    attempted: b.recordsAttempted,
+    inserted: b.recordsInserted,
+    skipped: b.recordsSkipped,
+    failed: b.recordsFailed,
+    conflicts: b.recordsConflict,
+    insertedIds: b.adapterResult.perRecord
+      .filter((r) => r.status === 'inserted')
+      .map((r) => r.recordHash),
+    failures: b.adapterResult.perRecord
+      .filter((r) => r.status === 'failed')
+      .map((r) => ({
+        recordHash: r.recordHash,
+        rowIndex: r.rowIndex,
+        reason: r.reason ?? 'unknown',
+      })),
+  }))
+
+  const notes: string[] = []
   if (mode === 'LIVE') {
-    if (readback) {
+    notes.push(
+      `${modeLabel}: wrote to the local SQL Server container. No production system was contacted.`,
+    )
+    if (verified !== null) {
       notes.push(
-        `Read-back verified ${verifiedCount}/${inserted} inserted rows${
-          readback.missing.length > 0 ? ` — missing: ${readback.missing.slice(0, 3).join(', ')}` : ''
+        `Read-back verified ${verified}/${inserted} inserted row(s)${
+          readback?.missing.length ? ` — missing: ${readback.missing.slice(0, 3).join(', ')}` : ''
         }.`,
       )
     } else {
-      notes.push('Read-back skipped.')
+      notes.push('Read-back was skipped.')
     }
   } else {
     notes.push(
-      'MOCK/DRY_RUN: 0 rows reported as successful. Switch to SQL Local Test to run against the local SQL Server container.',
+      `${modeLabel}: no database writes occurred. The success count is reported as 0 because nothing was executed.`,
     )
   }
+  notes.push(
+    `Chain: source=${counts.source} · excluded=${counts.excluded} · blocked=${counts.blocked} · eligible=${counts.eligible} · attempted=${counts.attempted} · inserted=${counts.inserted} · verified=${counts.verified ?? '—'}.`,
+  )
+  notes.push(
+    `Batches: ${manifest.batches.length}; retry queue: ${manifest.retryQueue.length}; idempotency hashes: ${manifest.idempotencyHashes.length}; conflicts: ${conflicts}.`,
+  )
   if (args.extraNotes) notes.push(...args.extraNotes)
 
   return {
@@ -335,11 +430,15 @@ function toResultSummary(args: ResultArgs): MigrationResultSummary {
       destination === 'lemon'
         ? 'CXLite · Cosmos DB (DEV pending)'
         : 'SQL Server · analytic_leads_sales',
-    totalRecords: args.total,
+    mode: resultMode,
+    modeLabel,
+    totalRecords: args.source,
     successful: successfulReported,
     failed,
-    skipped: skipped + excluded,
-    pending: Math.max(0, args.total - successfulReported - skipped - failed - conflicts),
+    skipped: skipped + args.excluded,
+    pending: Math.max(0, args.eligible - successfulReported - skipped - failed - conflicts),
+    counts,
+    batches,
     startedAt: started.toISOString(),
     finishedAt: finished.toISOString(),
     simulated: mode !== 'LIVE',
